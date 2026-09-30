@@ -24,9 +24,9 @@ TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION")
 
 TELEGRAM_TARGET = "@fwd19472"
 
-UKRCREWING_LOGIN_URL = "https://ukrcrewing.com.ua/en/login"
+UKRCREWING_BASE = "https://ukrcrewing.com.ua"
 
-UKRCREWING_VACANCY_URL = (
+UKRCREWING_URL = (
     "https://ukrcrewing.com.ua/vacancy/"
     "?v_sort=1&v_sort_dir=1"
 )
@@ -34,24 +34,9 @@ UKRCREWING_VACANCY_URL = (
 SENT_FILE = Path("/app/sent_jobs.json")
 
 
-# ------------------------------------------------------------
-# FIRST RUN
-# ------------------------------------------------------------
-#
-# True  = immediately scan today's vacancies once.
-# False = only use the schedule.
-#
-# Keep True now.
-# After the first successful deployment it can stay True:
-# the memory will prevent duplicates.
-# ------------------------------------------------------------
-
-RUN_SCAN_IMMEDIATELY = True
-
-
-# ------------------------------------------------------------
+# ============================================================
 # SCHEDULE
-# ------------------------------------------------------------
+# ============================================================
 
 SCHEDULE = [
     (9, 40),
@@ -74,7 +59,6 @@ FREE_EMAIL_DOMAINS = {
     "bk.ru",
     "inbox.ru",
     "list.ru",
-    "rambler.ru",
 
     "yandex.ru",
     "yandex.com",
@@ -90,18 +74,24 @@ FREE_EMAIL_DOMAINS = {
 
     "icloud.com",
     "me.com",
-    "mac.com",
 
     "proton.me",
     "protonmail.com",
 
     "yahoo.com",
     "yahoo.co.uk",
+
     "aol.com",
+
+    "rambler.ru",
 
     "ukr.net",
 }
 
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 telegram_client = None
 
@@ -115,100 +105,27 @@ def log(message=""):
 
 
 # ============================================================
-# TIME
-# ============================================================
-
-def london_now():
-
-    try:
-
-        from zoneinfo import ZoneInfo
-
-        return datetime.now(
-            ZoneInfo("Europe/London")
-        )
-
-    except Exception:
-
-        return datetime.now()
-
-
-def today_string():
-
-    return london_now().strftime("%d.%m.%Y")
-
-
-# ============================================================
-# HELPERS
+# TEXT HELPERS
 # ============================================================
 
 def normalize_space(text):
-
-    return re.sub(
-        r"\s+",
-        " ",
-        text or ""
-    ).strip()
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
-def normalize_date(value):
-
+def clean_value(value):
     if not value:
         return None
 
     value = normalize_space(value)
 
-    # 30.09.2026
-    m = re.search(
-        r"\b(\d{2})\.(\d{2})\.(\d{4})\b",
-        value
+    value = value.strip(
+        " \t\r\n:;-–—"
     )
 
-    if m:
+    if not value:
+        return None
 
-        return (
-            f"{m.group(1)}."
-            f"{m.group(2)}."
-            f"{m.group(3)}"
-        )
-
-    # 30.09.26
-    m = re.search(
-        r"\b(\d{2})\.(\d{2})\.(\d{2})\b",
-        value
-    )
-
-    if m:
-
-        return (
-            f"{m.group(1)}."
-            f"{m.group(2)}."
-            f"20{m.group(3)}"
-        )
-
-    return None
-
-
-def first_match(patterns, text):
-
-    for pattern in patterns:
-
-        m = re.search(
-            pattern,
-            text or "",
-            re.I | re.M
-        )
-
-        if m:
-
-            value = normalize_space(
-                m.group(1)
-            )
-
-            if value:
-                return value
-
-    return None
+    return value
 
 
 # ============================================================
@@ -277,7 +194,7 @@ def check_environment():
     )
 
     log(
-        f"Today's date: {today_string()}"
+        f"Schedule: {SCHEDULE}"
     )
 
 
@@ -306,14 +223,14 @@ def load_memory():
 
         if isinstance(data, list):
 
-            return {
+            result = {
                 str(x)
                 for x in data
             }
 
-        if isinstance(data, dict):
+        elif isinstance(data, dict):
 
-            return {
+            result = {
                 str(x)
                 for x in data.get(
                     "sent",
@@ -321,24 +238,52 @@ def load_memory():
                 )
             }
 
+        else:
+
+            result = set()
+
+        log(
+            f"Loaded sent IDs: {len(result)}"
+        )
+
+        if result:
+
+            log(
+                "Previously sent IDs:"
+            )
+
+            log(
+                str(
+                    sorted(
+                        result
+                    )
+                )
+            )
+
+        return result
+
     except Exception as e:
 
         log(
             f"WARNING: Could not read memory: {e}"
         )
 
-    return set()
+        return set()
 
 
 def save_memory(sent_jobs):
 
     try:
 
+        SENT_FILE.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         SENT_FILE.write_text(
             json.dumps(
                 sorted(
-                    sent_jobs,
-                    key=str
+                    sent_jobs
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -346,11 +291,41 @@ def save_memory(sent_jobs):
             encoding="utf-8",
         )
 
+        log(
+            f"Memory saved: {len(sent_jobs)} IDs."
+        )
+
     except Exception as e:
 
         log(
             f"WARNING: Could not save memory: {e}"
         )
+
+
+# ============================================================
+# LONDON TIME
+# ============================================================
+
+def london_now():
+
+    try:
+
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(
+            ZoneInfo("Europe/London")
+        )
+
+    except Exception:
+
+        return datetime.now()
+
+
+def today_date_string():
+
+    return london_now().strftime(
+        "%d.%m.%Y"
+    )
 
 
 # ============================================================
@@ -362,7 +337,7 @@ async def connect_telegram():
     global telegram_client
 
     log("")
-    log("=== CONNECTING TELEGRAM ===")
+    log("📡 Connecting to Telegram...")
 
     api_id = int(
         TELEGRAM_API_ID
@@ -380,6 +355,36 @@ async def connect_telegram():
 
         await telegram_client.connect()
 
+        log(
+            "🔌 Telegram client connected."
+        )
+
+        authorized = (
+            await telegram_client.is_user_authorized()
+        )
+
+        log(
+            f"Telegram authorized: {authorized}"
+        )
+
+        if not authorized:
+
+            raise RuntimeError(
+                "TELEGRAM_SESSION is not authorized."
+            )
+
+        me = await telegram_client.get_me()
+
+        log(
+            "Telegram account: "
+            f"{getattr(me, 'username', None) or ''} "
+            f"ID={getattr(me, 'id', None)}"
+        )
+
+        log(
+            "✅ Telegram connection successful."
+        )
+
     except Exception as e:
 
         log(
@@ -389,40 +394,8 @@ async def connect_telegram():
 
         raise RuntimeError(
             "Could not connect to Telegram "
-            "using TELEGRAM_SESSION."
+            "using the existing SESSION_STRING."
         )
-
-    if not telegram_client.is_connected():
-
-        raise RuntimeError(
-            "Telegram client is not connected."
-        )
-
-    authorized = (
-        await telegram_client.is_user_authorized()
-    )
-
-    log(
-        f"Telegram authorized: {authorized}"
-    )
-
-    if not authorized:
-
-        raise RuntimeError(
-            "TELEGRAM_SESSION is not authorized."
-        )
-
-    me = await telegram_client.get_me()
-
-    log(
-        "Telegram account: "
-        f"{getattr(me, 'username', None) or ''} "
-        f"{getattr(me, 'first_name', '')}"
-    )
-
-    log(
-        "Telegram connection successful."
-    )
 
 
 async def send_telegram(message):
@@ -438,7 +411,8 @@ async def send_telegram(message):
     if not telegram_client.is_connected():
 
         log(
-            "Telegram disconnected. Reconnecting..."
+            "🔌 Telegram client disconnected. "
+            "Connecting..."
         )
 
         await telegram_client.connect()
@@ -461,30 +435,13 @@ async def send_telegram(message):
 
 
 # ============================================================
-# EMAIL
+# EMAIL VALIDATION
 # ============================================================
 
-def extract_emails(text):
-
-    emails = re.findall(
-        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-        text or "",
-        re.I,
-    )
-
-    result = []
-
-    for email in emails:
-
-        email = email.lower().strip(
-            ".,;:()[]<>\"'"
-        )
-
-        if email not in result:
-
-            result.append(email)
-
-    return result
+EMAIL_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    re.I,
+)
 
 
 def valid_employer_email(email):
@@ -500,212 +457,328 @@ def valid_employer_email(email):
     domain = email.split(
         "@",
         1
-    )[1]
+    )[1].lower()
 
+    # Never use UkrCrewing itself
+    if domain == "ukrcrewing.com.ua":
+        return False
+
+    if domain.endswith(
+        ".ukrcrewing.com.ua"
+    ):
+        return False
+
+    # Never use free email providers
     if domain in FREE_EMAIL_DOMAINS:
         return False
 
     return True
 
 
-def get_employer_email(text):
+# ============================================================
+# CONTACT EMAIL
+# ============================================================
 
-    for email in extract_emails(text):
+def extract_contact_email(text):
+
+    """
+    VERY IMPORTANT:
+
+    We search ONLY around the vacancy's
+    'Контактный е-мейл' field.
+
+    We do NOT search the entire page for an email.
+    Therefore an email belonging to UkrCrewing,
+    the user's profile, footer, menu, etc. is ignored.
+    """
+
+    if not text:
+        return None
+
+    patterns = [
+
+        # Russian
+        r"Контактный\s+е-мейл\s*:\s*"
+        r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
+
+        # Ukrainian
+        r"Контактний\s+е-мейл\s*:\s*"
+        r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
+
+        # English
+        r"Contact\s+e-?mail\s*:\s*"
+        r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
+
+        # Generic email label
+        r"Е-?mail\s*:\s*"
+        r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.I,
+        )
+
+        if not match:
+            continue
+
+        email = (
+            match.group(1)
+            .lower()
+            .strip(
+                ".,;:()[]<>\"'"
+            )
+        )
 
         if valid_employer_email(email):
 
+            log(
+                f"📧 Corporate contact email found: "
+                f"{email}"
+            )
+
             return email
+
+        log(
+            f"🚫 Contact email rejected: "
+            f"{email}"
+        )
+
+        return None
+
+    log(
+        "🚫 No contact email found in vacancy."
+    )
 
     return None
 
 
 # ============================================================
-# CLEAN TEXT
+# DATE EXTRACTION
 # ============================================================
 
-REMOVE_PHRASES = [
-    "пишите нам",
-    "морякам",
-    "компаниям",
-    "создать резюме",
-    "поднять резюме в топ",
-    "разослать резюме",
-    "подписаться на вакансии",
-    "скачать базу компаний",
-    "войти",
-    "выход",
-    "регистрация",
-    "forgot your password",
-    "login",
-    "sign in",
-    "register",
-]
-
-
-def clean_info(text):
-
-    if not text:
-        return ""
-
-    text = re.sub(
-        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-        "",
-        text,
-        flags=re.I,
-    )
-
-    text = re.sub(
-        r"https?://\S+|www\.\S+",
-        "",
-        text,
-        flags=re.I,
-    )
-
-    lines = []
-
-    for raw in text.splitlines():
-
-        line = normalize_space(raw)
-
-        if not line:
-            continue
-
-        low = line.lower()
-
-        if any(
-            phrase in low
-            for phrase in REMOVE_PHRASES
-        ):
-            continue
-
-        if line in lines:
-            continue
-
-        lines.append(line)
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# PARSING DETAIL PAGE
-# ============================================================
-
-def extract_title(text):
+def extract_publication_date(text):
 
     patterns = [
-        r"Вакансия\s+(.+?)(?:\n|$)",
-        r"Vacancy\s+(.+?)(?:\n|$)",
+
+        r"Опубликована\s*:\s*"
+        r"(\d{2}\.\d{2}\.\d{4})",
+
+        r"Опубликовано\s*:\s*"
+        r"(\d{2}\.\d{2}\.\d{4})",
+
+        r"Published\s*:\s*"
+        r"(\d{2}\.\d{2}\.\d{4})",
+
+        r"Published\s+on\s*:\s*"
+        r"(\d{2}\.\d{2}\.\d{4})",
     ]
 
-    return first_match(
-        patterns,
-        text
-    )
+    for pattern in patterns:
 
+        match = re.search(
+            pattern,
+            text or "",
+            re.I,
+        )
+
+        if match:
+
+            return match.group(1)
+
+    return None
+
+
+def is_today(publication_date):
+
+    if not publication_date:
+        return False
+
+    return publication_date == today_date_string()
+
+
+# ============================================================
+# GENERIC FIELD EXTRACTION
+# ============================================================
+
+def extract_field(
+    text,
+    labels,
+):
+
+    for label in labels:
+
+        pattern = (
+            re.escape(label)
+            + r"\s*:\s*([^\n]+)"
+        )
+
+        match = re.search(
+            pattern,
+            text or "",
+            re.I,
+        )
+
+        if match:
+
+            value = clean_value(
+                match.group(1)
+            )
+
+            if value:
+                return value
+
+    return None
+
+
+# ============================================================
+# VACANCY TITLE
+# ============================================================
+
+def extract_vacancy_title(text):
+
+    patterns = [
+
+        r"Вакансия\s+(.+?)(?:\n|$)",
+
+        r"Vacancy\s+(.+?)(?:\n|$)",
+
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text or "",
+            re.I,
+        )
+
+        if match:
+
+            value = clean_value(
+                match.group(1)
+            )
+
+            if value:
+                return value
+
+    return None
+
+
+# ============================================================
+# RANK
+# ============================================================
 
 def extract_rank(text):
 
-    value = first_match(
-        [
-            r"Должность\s*[:\-]\s*([^\n]+)",
-            r"Position\s*[:\-]\s*([^\n]+)",
-        ],
+    title = extract_vacancy_title(
         text
     )
 
-    if value:
-        return value
+    if title:
 
-    ranks = [
-        "Chief Engineer",
-        "Chief Officer",
-        "2nd Engineer",
-        "3rd Engineer",
-        "4th Engineer",
-        "2nd Officer",
-        "3rd Officer",
-        "Master",
-        "ETO",
-        "Electrician",
-        "Bosun",
-        "Boatswain",
-        "Able Seaman",
-        "Ordinary Seaman",
-        "OS",
-        "Fitter",
-        "Crane Operator",
-        "Cook",
-        "Mess Boy",
-        "DPO",
-        "JDPO",
-        "Deck Cadet",
-        "Engine Cadet",
-    ]
+        title_lower = title.lower()
 
-    low = text.lower()
+        ranks = [
+            "Chief Officer",
+            "Chief Mate",
+            "Master",
+            "1st Officer",
+            "2nd Officer",
+            "3rd Officer",
+            "Chief Engineer",
+            "1st Engineer",
+            "2nd Engineer",
+            "3rd Engineer",
+            "4th Engineer",
+            "ETO",
+            "Electrician",
+            "Boatswain",
+            "Bosun",
+            "Able Seaman",
+            "AB",
+            "Ordinary Seaman",
+            "OS",
+            "Motorman",
+            "Oiler",
+            "Fitter",
+            "Crane Operator",
+            "Cook",
+            "Chief Cook",
+            "Messman",
+            "Steward",
+            "Deck Cadet",
+            "Engine Cadet",
+            "DPO",
+            "JDPO",
+        ]
 
-    for rank in ranks:
+        for rank in ranks:
 
-        if re.search(
-            r"\b"
-            + re.escape(rank.lower())
-            + r"\b",
-            low
-        ):
+            if re.search(
+                r"\b"
+                + re.escape(
+                    rank.lower()
+                )
+                + r"\b",
+                title_lower,
+            ):
 
-            return rank
+                return rank
 
     return "Multiple positions"
 
 
+# ============================================================
+# VESSEL TYPE
+# ============================================================
+
 def extract_vessel_type(text):
 
-    value = first_match(
+    value = extract_field(
+        text,
         [
-            r"Тип судна\s*[:\-]\s*([^\n]+)",
-            r"Vessel type\s*[:\-]\s*([^\n]+)",
+            "Тип судна",
+            "Vessel type",
+            "Ship type",
         ],
-        text
     )
 
     if value:
-        return value
+
+        return value[:100]
 
     types = [
         "Bulk Carrier",
-        "Container",
         "Container Ship",
+        "Container Vessel",
         "Tanker",
         "Oil Tanker",
         "Chemical Tanker",
-        "Oil Chemical Tanker",
-        "LNG Tanker",
-        "LPG Tanker",
-        "General Cargo",
-        "Heavy Lift Vessel",
+        "LNG Carrier",
+        "LPG Carrier",
         "Ro-Ro",
         "Offshore Supply Vessel",
         "OSV",
         "AHTS",
         "PSV",
         "Diving Support Vessel",
-        "DSV",
         "ERRV",
         "FPSO",
         "FSO",
         "Drilling Vessel",
         "Research Vessel",
         "Survey Vessel",
-        "Cruise Vessel",
         "Cruise Ship",
-        "Dredger",
-        "Coaster",
-        "Motor Yacht",
-        "Passenger Vessel",
-        "Multi-Purpose Vessel",
+        "Cruise Vessel",
     ]
 
-    low = text.lower()
+    low = (
+        text or ""
+    ).lower()
 
     for vessel_type in types:
 
@@ -716,77 +789,99 @@ def extract_vessel_type(text):
     return None
 
 
+# ============================================================
+# VESSEL NAME
+# ============================================================
+
 def extract_vessel_name(text):
 
-    return first_match(
+    return extract_field(
+        text,
         [
-            r"Название судна\s*[:\-]\s*([^\n]+)",
-            r"Vessel name\s*[:\-]\s*([^\n]+)",
-            r"Ship name\s*[:\-]\s*([^\n]+)",
+            "Название судна",
+            "Vessel name",
+            "Ship name",
         ],
-        text
     )
 
+
+# ============================================================
+# REGION
+# ============================================================
 
 def extract_region(text):
 
-    return first_match(
+    return extract_field(
+        text,
         [
-            r"Регион работы\s*[:\-]\s*([^\n]+)",
-            r"Region\s*[:\-]\s*([^\n]+)",
-            r"Trading area\s*[:\-]\s*([^\n]+)",
+            "Регион работы",
+            "Region",
+            "Trading area",
+            "Trading Area",
         ],
-        text
     )
 
 
-def extract_date(text):
+# ============================================================
+# JOINING DATE
+# ============================================================
 
-    return first_match(
+def extract_joining_date(text):
+
+    return extract_field(
+        text,
         [
-            r"Дата посадки на борт\s*[:\-]\s*([^\n]+)",
-            r"Joining date\s*[:\-]\s*([^\n]+)",
-            r"Joining\s*[:\-]\s*([^\n]+)",
+            "Дата посадки на борт",
+            "Joining date",
+            "Joining",
+            "Join date",
         ],
-        text
     )
 
+
+# ============================================================
+# DURATION
+# ============================================================
 
 def extract_duration(text):
 
-    return first_match(
+    return extract_field(
+        text,
         [
-            r"Длительность рейса\s*[:\-]\s*([^\n]+)",
-            r"Voyage duration\s*[:\-]\s*([^\n]+)",
-            r"Contract duration\s*[:\-]\s*([^\n]+)",
-            r"Duration\s*[:\-]\s*([^\n]+)",
+            "Длительность рейса",
+            "Contract duration",
+            "Duration",
+            "Contract",
         ],
-        text
     )
 
+
+# ============================================================
+# SALARY
+# ============================================================
 
 def extract_salary(text):
 
-    value = first_match(
+    value = extract_field(
+        text,
         [
-            r"Зарплата\s*[:\-]\s*([^\n]+)",
-            r"Salary\s*[:\-]\s*([^\n]+)",
-            r"Wage\s*[:\-]\s*([^\n]+)",
-            r"Pay\s*[:\-]\s*([^\n]+)",
+            "Зарплата",
+            "Salary",
+            "Wage",
+            "Pay",
         ],
-        text
     )
 
     if value:
-        return value
+
+        return value[:100]
 
     match = re.search(
-        r"(?:EUR|USD|GBP|€|\$|£)\s?"
-        r"\d[\d\s,.]*(?:\s*-\s*"
-        r"(?:EUR|USD|GBP|€|\$|£)?\s?"
-        r"\d[\d\s,.]*)?",
+        r"(?:EUR|USD|GBP|€|\$|£)"
+        r"\s?\d[\d,.\s]*(?:\s*(?:per|/)\s*"
+        r"(?:month|day|week))?",
         text or "",
-        re.I
+        re.I,
     )
 
     if match:
@@ -798,207 +893,347 @@ def extract_salary(text):
     return None
 
 
-def extract_published_date(text):
-
-    patterns = [
-        r"Опубликована\s*:\s*(\d{2}\.\d{2}\.\d{4})",
-        r"Опубликовано\s*:\s*(\d{2}\.\d{2}\.\d{4})",
-        r"Vacancy posted\s*[:\-]?\s*(\d{2}\.\d{2}\.\d{2,4})",
-        r"Posted\s*[:\-]?\s*(\d{2}\.\d{2}\.\d{2,4})",
-    ]
-
-    value = first_match(
-        patterns,
-        text
-    )
-
-    return normalize_date(value)
-
-
-def extract_phone(text):
-
-    patterns = [
-        r"Телефон для отклика на вакансию\s*[:\-]\s*([^\n]+)",
-        r"Phone\s*[:\-]\s*([^\n]+)",
-        r"Contact phone\s*[:\-]\s*([^\n]+)",
-    ]
-
-    return first_match(
-        patterns,
-        text
-    )
-
-
-def extract_agency(text):
-
-    return first_match(
-        [
-            r"Крюинг\s*:\s*([^\n]+)",
-            r"Crewing\s*:\s*([^\n]+)",
-            r"Agency\s*:\s*([^\n]+)",
-        ],
-        text
-    )
-
-
-def extract_additional_info(text):
-
-    markers = [
-        "Дополнительная информация:",
-        "Additional information:",
-        "Additional Information:",
-    ]
-
-    for marker in markers:
-
-        pos = text.lower().find(
-            marker.lower()
-        )
-
-        if pos >= 0:
-
-            part = text[
-                pos + len(marker):
-            ]
-
-            stop_markers = [
-                "Телефон для отклика",
-                "Контактный е-мейл",
-                "Contact email",
-                "Phone",
-                "Крюинг:",
-                "Crewing:",
-                "Agency:",
-            ]
-
-            for stop in stop_markers:
-
-                idx = part.lower().find(
-                    stop.lower()
-                )
-
-                if idx >= 0:
-
-                    part = part[:idx]
-
-            return clean_info(
-                part
-            )[:1200]
-
-    return ""
-
-
 # ============================================================
-# JOB MESSAGE
+# INFO CLEANING
 # ============================================================
 
-def make_message(job):
+REMOVE_PHRASES = [
+    "Пишите нам",
+    "Морякам",
+    "Компаниям",
+    "Создать резюме",
+    "Разослать резюме",
+    "Поднять резюме в ТОП",
+    "Скачать базу компаний",
+    "Подписаться на вакансии",
+    "Крюинги на карте",
+    "Услуги для моряков",
+    "Услуги для компаний",
+    "Выход",
+    "Персональное меню",
+]
+
+
+def clean_info(text):
+
+    if not text:
+        return ""
 
     lines = []
 
-    lines.append("🇺🇦 UkrCrewing")
-    lines.append("")
+    for raw in text.splitlines():
 
-    lines.append(
-        f"⚓ Rank: {job['rank']}"
+        line = normalize_space(
+            raw
+        )
+
+        if not line:
+            continue
+
+        low = line.lower()
+
+        if any(
+            phrase.lower() in low
+            for phrase in REMOVE_PHRASES
+        ):
+            continue
+
+        if EMAIL_RE.search(line):
+            continue
+
+        if line in lines:
+            continue
+
+        lines.append(line)
+
+    # Keep useful vacancy information.
+    keywords = [
+        "дополнительная информация",
+        "additional information",
+        "requirement",
+        "requirements",
+        "required",
+        "experience",
+        "certificate",
+        "certificates",
+        "stcw",
+        "dp",
+        "dpo",
+        "bosi",
+        "h2s",
+        "crew",
+        "nationality",
+        "visa",
+        "english",
+        "age",
+        "previous",
+        "experience",
+        "salary",
+        "duration",
+        "boarding",
+        "joining",
+        "management",
+        "flag",
+        "dwt",
+        "year of build",
+    ]
+
+    preferred = []
+
+    for line in lines:
+
+        low = line.lower()
+
+        if any(
+            keyword in low
+            for keyword in keywords
+        ):
+
+            preferred.append(line)
+
+    if preferred:
+
+        lines = preferred
+
+    result = []
+
+    total = 0
+
+    for line in lines:
+
+        if total + len(line) > 1500:
+            break
+
+        result.append(line)
+
+        total += len(line)
+
+    return "\n".join(
+        result
+    ).strip()
+
+
+# ============================================================
+# JOB ID
+# ============================================================
+
+def extract_job_id(url):
+
+    match = re.search(
+        r"/vacancy/(\d+)",
+        url or "",
+        re.I,
     )
 
-    if job.get("vessel_name"):
+    if match:
 
-        lines.append(
-            f"🚢 Vessel name: "
-            f"{job['vessel_name']}"
-        )
+        return match.group(1)
 
-    if job.get("vessel_type"):
+    return None
 
-        lines.append(
-            f"🚢 Vessel type: "
-            f"{job['vessel_type']}"
-        )
 
-    if job.get("region"):
+# ============================================================
+# JOB LINKS FROM PAGE
+# ============================================================
 
-        lines.append(
-            f"🌍 Region: "
-            f"{job['region']}"
-        )
+async def get_job_links(page):
 
-    if job.get("date"):
+    links = {}
 
-        lines.append(
-            f"📅 Date: "
-            f"{job['date']}"
-        )
-
-    if job.get("duration"):
-
-        lines.append(
-            f"⏱️ Duration: "
-            f"{job['duration']}"
-        )
-
-    if job.get("salary"):
-
-        lines.append(
-            f"💰 Salary: "
-            f"{job['salary']}"
-        )
-
-    if job.get("info"):
-
-        lines.append(
-            f"ℹ️ {job['info']}"
-        )
-
-    lines.append(
-        f"📩 Contact: "
-        f"{job['email']}"
+    anchors = page.locator(
+        'a[href*="/vacancy/"]'
     )
 
-    hashtags = []
+    count = await anchors.count()
 
-    if job["rank"] != "Multiple positions":
+    for i in range(count):
 
-        tag = re.sub(
-            r"[^A-Za-z0-9]",
-            "",
-            job["rank"]
-        )
+        try:
 
-        if tag:
-            hashtags.append(
-                "#" + tag
+            href = await anchors.nth(
+                i
+            ).get_attribute(
+                "href"
             )
 
-    if job.get("vessel_type"):
+            if not href:
+                continue
 
-        tag = re.sub(
-            r"[^A-Za-z0-9]",
-            "",
-            job["vessel_type"]
-        )
-
-        if tag:
-            hashtags.append(
-                "#" + tag
+            full_url = urljoin(
+                UKRCREWING_BASE,
+                href,
             )
 
-    hashtags.append(
-        "#MerchantFleet"
+            job_id = extract_job_id(
+                full_url
+            )
+
+            if not job_id:
+                continue
+
+            links[job_id] = full_url
+
+        except Exception:
+            continue
+
+    return links
+
+
+# ============================================================
+# PAGINATION
+# ============================================================
+
+async def get_pagination_links(page):
+
+    pages = {}
+
+    # Always include first page.
+    pages["0"] = UKRCREWING_URL
+
+    anchors = page.locator(
+        "a[href]"
     )
 
-    hashtags = list(
-        dict.fromkeys(
-            hashtags
+    count = await anchors.count()
+
+    for i in range(count):
+
+        try:
+
+            href = await anchors.nth(
+                i
+            ).get_attribute(
+                "href"
+            )
+
+            if not href:
+                continue
+
+            full_url = urljoin(
+                UKRCREWING_BASE,
+                href,
+            )
+
+            match = re.search(
+                r"/vacancy/p(\d+)/?",
+                full_url,
+                re.I,
+            )
+
+            if not match:
+                continue
+
+            page_number = match.group(1)
+
+            pages[page_number] = full_url
+
+        except Exception:
+            continue
+
+    return pages
+
+
+async def discover_vacancy_pages(page):
+
+    log(
+        "=== DISCOVERING VACANCY PAGES ==="
+    )
+
+    pages = {}
+
+    current_url = UKRCREWING_URL
+
+    for page_number in range(0, 100):
+
+        if page_number == 0:
+
+            url = current_url
+
+        else:
+
+            url = (
+                f"{UKRCREWING_BASE}/vacancy/"
+                f"p{page_number}/"
+            )
+
+        log(
+            f"Checking vacancy page: {url}"
         )
+
+        try:
+
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+
+            await page.wait_for_timeout(
+                700
+            )
+
+        except Exception as e:
+
+            log(
+                f"Could not open page: {e}"
+            )
+
+            break
+
+        if await is_login_page(
+            page
+        ):
+
+            log(
+                "Redirected to login. "
+                "Stopping pagination."
+            )
+
+            break
+
+        links = await get_job_links(
+            page
+        )
+
+        log(
+            f"Found {len(links)} vacancy links "
+            f"on page {page_number}."
+        )
+
+        if not links:
+
+            log(
+                "No vacancy links found. "
+                "Stopping pagination."
+            )
+
+            break
+
+        for job_id, job_url in links.items():
+
+            pages[job_id] = job_url
+
+        # Check if page contains pagination.
+        # If there is no pX link, we stop.
+        pagination = await get_pagination_links(
+            page
+        )
+
+        if str(page_number + 1) not in pagination:
+
+            log(
+                "Next pagination page not found. "
+                "Pagination finished."
+            )
+
+            break
+
+    log(
+        f"TOTAL UNIQUE VACANCY LINKS FOUND: "
+        f"{len(pages)}"
     )
 
-    lines.append(
-        " ".join(hashtags)
-    )
-
-    return "\n".join(lines)
+    return pages
 
 
 # ============================================================
@@ -1007,7 +1242,9 @@ def make_message(job):
 
 async def is_login_page(page):
 
-    url = page.url.lower()
+    url = (
+        page.url or ""
+    ).lower()
 
     if "/login" in url:
         return True
@@ -1036,19 +1273,27 @@ async def login_to_ukrcrewing(page):
     log("=== UKR CREWING LOGIN ===")
     log("=" * 70)
 
+    login_url = (
+        f"{UKRCREWING_BASE}/en/login"
+    )
+
     await page.goto(
-        UKRCREWING_LOGIN_URL,
+        login_url,
         wait_until="domcontentloaded",
         timeout=60000,
     )
 
     await page.wait_for_timeout(
-        2000
+        1500
     )
 
     log(
-        f"Login URL: {page.url}"
+        f"Login page URL: {page.url}"
     )
+
+    # --------------------------------------------------------
+    # EMAIL
+    # --------------------------------------------------------
 
     email = None
 
@@ -1056,8 +1301,6 @@ async def login_to_ukrcrewing(page):
         'input[name="email"]',
         'input[type="email"]',
         'input[name="username"]',
-        'input[placeholder*="email" i]',
-        'input[placeholder*="e-mail" i]',
     ]
 
     for selector in selectors:
@@ -1076,8 +1319,7 @@ async def login_to_ukrcrewing(page):
                 email = loc
 
                 log(
-                    f"Email field found: "
-                    f"{selector}"
+                    f"Email field found: {selector}"
                 )
 
                 break
@@ -1088,9 +1330,12 @@ async def login_to_ukrcrewing(page):
     if email is None:
 
         raise RuntimeError(
-            "UKR Crewing email field "
-            "not found."
+            "UKR Crewing email field not found."
         )
+
+    # --------------------------------------------------------
+    # PASSWORD
+    # --------------------------------------------------------
 
     password = page.locator(
         'input[type="password"]'
@@ -1099,9 +1344,16 @@ async def login_to_ukrcrewing(page):
     if await password.count() == 0:
 
         raise RuntimeError(
-            "UKR Crewing password field "
-            "not found."
+            "UKR Crewing password field not found."
         )
+
+    log(
+        "Password field found."
+    )
+
+    # --------------------------------------------------------
+    # FILL
+    # --------------------------------------------------------
 
     await email.fill(
         UKRCREWING_EMAIL
@@ -1115,14 +1367,15 @@ async def login_to_ukrcrewing(page):
         "Credentials filled."
     )
 
+    # --------------------------------------------------------
+    # SUBMIT
+    # --------------------------------------------------------
+
     submit = None
 
     selectors = [
         'input[type="submit"]',
         'button[type="submit"]',
-        'button:has-text("Login")',
-        'button:has-text("Log in")',
-        'button:has-text("Sign in")',
     ]
 
     for selector in selectors:
@@ -1141,8 +1394,7 @@ async def login_to_ukrcrewing(page):
                 submit = loc
 
                 log(
-                    f"Login button found: "
-                    f"{selector}"
+                    f"Login button found: {selector}"
                 )
 
                 break
@@ -1156,31 +1408,26 @@ async def login_to_ukrcrewing(page):
 
     else:
 
+        log(
+            "Submit button not found. "
+            "Pressing Enter."
+        )
+
         await password.press(
             "Enter"
         )
 
     await page.wait_for_timeout(
-        4000
+        3000
     )
 
     log(
         f"URL after login: {page.url}"
     )
 
-    if await is_login_page(page):
-
-        body = await page.locator(
-            "body"
-        ).inner_text()
-
-        log(
-            "❌ Still on login page."
-        )
-
-        log(
-            body[:1500]
-        )
+    if await is_login_page(
+        page
+    ):
 
         raise RuntimeError(
             "UKR Crewing login failed."
@@ -1203,19 +1450,25 @@ async def open_vacancy_page(page):
     )
 
     await page.goto(
-        UKRCREWING_VACANCY_URL,
+        UKRCREWING_URL,
         wait_until="domcontentloaded",
         timeout=60000,
     )
 
     await page.wait_for_timeout(
-        2000
+        1500
     )
 
-    if await is_login_page(page):
+    log(
+        f"Vacancy page URL: {page.url}"
+    )
+
+    if await is_login_page(
+        page
+    ):
 
         log(
-            "Redirected to login."
+            "Authentication required."
         )
 
         await login_to_ukrcrewing(
@@ -1223,348 +1476,41 @@ async def open_vacancy_page(page):
         )
 
         await page.goto(
-            UKRCREWING_VACANCY_URL,
+            UKRCREWING_URL,
             wait_until="domcontentloaded",
             timeout=60000,
         )
 
         await page.wait_for_timeout(
-            2000
+            1500
         )
 
-    if await is_login_page(page):
+    if await is_login_page(
+        page
+    ):
 
         raise RuntimeError(
-            "Could not authenticate "
-            "to UKR Crewing."
+            "Authentication failed."
         )
 
     log(
-        f"Vacancy page URL: {page.url}"
-    )
-
-    log(
-        "Vacancy page loaded."
+        "✅ Vacancy page loaded."
     )
 
 
 # ============================================================
-# GET VACANCY LINKS FROM PAGE
+# READ JOB
 # ============================================================
 
-VACANCY_ID_RE = re.compile(
-    r"/vacancy/(\d+)"
-)
-
-
-async def get_vacancy_links(page):
-
-    links = {}
-
-    anchors = page.locator(
-        "a[href]"
-    )
-
-    count = await anchors.count()
-
-    for i in range(count):
-
-        try:
-
-            href = await anchors.nth(
-                i
-            ).get_attribute(
-                "href"
-            )
-
-            if not href:
-                continue
-
-            match = VACANCY_ID_RE.search(
-                href
-            )
-
-            if not match:
-                continue
-
-            vacancy_id = match.group(
-                1
-            )
-
-            full_url = urljoin(
-                "https://ukrcrewing.com.ua",
-                href
-            )
-
-            if "/login" in full_url:
-                continue
-
-            links[
-                vacancy_id
-            ] = full_url
-
-        except Exception:
-            continue
-
-    return links
-
-
-# ============================================================
-# PARSE DATE FROM LIST PAGE
-# ============================================================
-
-async def get_page_text(page):
-
-    try:
-
-        return await page.locator(
-            "body"
-        ).inner_text()
-
-    except Exception:
-
-        return ""
-
-
-def page_contains_today_vacancies(text):
-
-    today = today_string()
-
-    # Full date
-    if today in text:
-        return True
-
-    # Short website format: 30.09.26
-    short_today = london_now().strftime(
-        "%d.%m.%y"
-    )
-
-    if short_today in text:
-        return True
-
-    return False
-
-
-def page_contains_older_dates(text):
-
-    # This is only a helper.
-    # Actual job dates are verified
-    # on each detail page.
-    return False
-
-
-# ============================================================
-# PAGINATION
-# ============================================================
-
-async def get_next_page_url(page):
-
-    anchors = page.locator(
-        "a[href]"
-    )
-
-    count = await anchors.count()
-
-    current_url = page.url
-
-    current_match = re.search(
-        r"/vacancy/p(\d+)",
-        current_url
-    )
-
-    current_page = (
-        int(current_match.group(1))
-        if current_match
-        else 0
-    )
-
-    expected_page = (
-        current_page + 1
-    )
-
-    possible_urls = []
-
-    for i in range(count):
-
-        try:
-
-            href = await anchors.nth(
-                i
-            ).get_attribute(
-                "href"
-            )
-
-            if not href:
-                continue
-
-            full_url = urljoin(
-                "https://ukrcrewing.com.ua",
-                href
-            )
-
-            match = re.search(
-                r"/vacancy/p(\d+)",
-                full_url
-            )
-
-            if not match:
-                continue
-
-            page_number = int(
-                match.group(1)
-            )
-
-            if page_number == expected_page:
-
-                possible_urls.append(
-                    full_url
-                )
-
-        except Exception:
-            continue
-
-    if possible_urls:
-
-        return possible_urls[0]
-
-    # Fallback: build URL ourselves
-    return (
-        f"https://ukrcrewing.com.ua"
-        f"/vacancy/p{expected_page}/"
-        f"?v_sort=1&v_sort_dir=1"
-    )
-
-
-async def collect_today_links(page):
-
-    log("")
-    log("=" * 70)
-    log("=== COLLECTING TODAY'S VACANCIES ===")
-    log("=" * 70)
-
-    all_links = {}
-
-    visited_pages = set()
-
-    page_number = 0
-
-    while True:
-
-        current_url = page.url
-
-        if current_url in visited_pages:
-            break
-
-        visited_pages.add(
-            current_url
-        )
-
-        log("")
-        log(
-            f"Scanning vacancy page "
-            f"{page_number}: "
-            f"{current_url}"
-        )
-
-        page_text = await get_page_text(
-            page
-        )
-
-        # If today's date isn't on the page,
-        # there is no reason to continue.
-        if (
-            page_number > 0
-            and not page_contains_today_vacancies(
-                page_text
-            )
-        ):
-
-            log(
-                "No today's date detected "
-                "on this page."
-            )
-
-            log(
-                "Stopping pagination."
-            )
-
-            break
-
-        links = await get_vacancy_links(
-            page
-        )
-
-        log(
-            f"Found {len(links)} "
-            f"vacancy links on page."
-        )
-
-        for vacancy_id, url in links.items():
-
-            all_links[
-                vacancy_id
-            ] = url
-
-        next_url = await get_next_page_url(
-            page
-        )
-
-        if not next_url:
-            break
-
-        if next_url in visited_pages:
-            break
-
-        # Safety limit
-        if page_number >= 100:
-            log(
-                "Pagination safety limit reached."
-            )
-            break
-
-        page_number += 1
-
-        try:
-
-            await page.goto(
-                next_url,
-                wait_until="domcontentloaded",
-                timeout=60000,
-            )
-
-            await page.wait_for_timeout(
-                1200
-            )
-
-        except Exception as e:
-
-            log(
-                f"Could not open next page: {e}"
-            )
-
-            break
-
-    log("")
-    log(
-        f"Total vacancy links collected: "
-        f"{len(all_links)}"
-    )
-
-    return all_links
-
-
-# ============================================================
-# READ VACANCY DETAIL
-# ============================================================
-
-async def read_vacancy(
+async def read_job(
     page,
-    vacancy_id,
+    job_id,
     url,
 ):
 
+    log("")
     log(
-        f"Opening vacancy {vacancy_id}"
+        f"Opening vacancy: {job_id}"
     )
 
     try:
@@ -1576,22 +1522,24 @@ async def read_vacancy(
         )
 
         await page.wait_for_timeout(
-            800
+            700
         )
 
     except Exception as e:
 
         log(
-            f"Could not open "
-            f"{vacancy_id}: {e}"
+            f"Could not open vacancy "
+            f"{job_id}: {e}"
         )
 
         return None
 
-    if await is_login_page(page):
+    if await is_login_page(
+        page
+    ):
 
         log(
-            f"{vacancy_id}: "
+            f"Vacancy {job_id} "
             "redirected to login."
         )
 
@@ -1606,8 +1554,8 @@ async def read_vacancy(
     except Exception as e:
 
         log(
-            f"Could not read "
-            f"{vacancy_id}: {e}"
+            f"Could not read vacancy "
+            f"{job_id}: {e}"
         )
 
         return None
@@ -1616,65 +1564,292 @@ async def read_vacancy(
 
     if not text:
 
+        log(
+            f"Skipping {job_id}: "
+            "empty page."
+        )
+
         return None
 
-    published_date = (
-        extract_published_date(
+    # --------------------------------------------------------
+    # DATE
+    # --------------------------------------------------------
+
+    publication_date = (
+        extract_publication_date(
             text
         )
     )
 
-    today = today_string()
+    log(
+        f"Publication date: "
+        f"{publication_date}"
+    )
 
-    if published_date != today:
+    today = today_date_string()
 
-        # Also accept short format comparison
-        short_today = london_now().strftime(
-            "%d.%m.%y"
+    if publication_date != today:
+
+        log(
+            f"⏭️ Skipping {job_id}: "
+            f"not today "
+            f"({publication_date} != {today})"
         )
 
-        if published_date != short_today:
+        return None
 
-            log(
-                f"Skipping {vacancy_id}: "
-                f"published {published_date}, "
-                f"today {today}"
-            )
+    # --------------------------------------------------------
+    # CONTACT EMAIL
+    # --------------------------------------------------------
 
-            return None
-
-    email = get_employer_email(
+    email = extract_contact_email(
         text
     )
 
     if not email:
 
         log(
-            f"Skipping {vacancy_id}: "
-            "no valid employer email."
+            f"⏭️ Skipping {job_id}: "
+            "no valid corporate email "
+            "in vacancy contact field."
         )
 
         return None
 
+    # --------------------------------------------------------
+    # PARSE
+    # --------------------------------------------------------
+
     job = {
-        "id": vacancy_id,
+        "id": job_id,
+
         "url": url,
-        "title": extract_title(text),
-        "email": email,
-        "rank": extract_rank(text),
-        "vessel_name": extract_vessel_name(text),
-        "vessel_type": extract_vessel_type(text),
-        "region": extract_region(text),
-        "date": extract_date(text),
-        "duration": extract_duration(text),
-        "salary": extract_salary(text),
-        "published_date": published_date,
-        "phone": extract_phone(text),
-        "agency": extract_agency(text),
-        "info": extract_additional_info(text),
+
+        "publication_date":
+            publication_date,
+
+        "title":
+            extract_vacancy_title(
+                text
+            ),
+
+        "rank":
+            extract_rank(
+                text
+            ),
+
+        "vessel_name":
+            extract_vessel_name(
+                text
+            ),
+
+        "vessel_type":
+            extract_vessel_type(
+                text
+            ),
+
+        "region":
+            extract_region(
+                text
+            ),
+
+        "date":
+            extract_joining_date(
+                text
+            ),
+
+        "duration":
+            extract_duration(
+                text
+            ),
+
+        "salary":
+            extract_salary(
+                text
+            ),
+
+        "email":
+            email,
+
+        "info":
+            clean_info(
+                text
+            ),
     }
 
     return job
+
+
+# ============================================================
+# TELEGRAM MESSAGE
+# ============================================================
+
+def make_message(job):
+
+    lines = []
+
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
+    lines.append(
+        "🇺🇦 UkrCrewing"
+    )
+
+    lines.append("")
+
+    # --------------------------------------------------------
+    # RANK
+    # --------------------------------------------------------
+
+    lines.append(
+        f"⚓ Rank: {job['rank']}"
+    )
+
+    # --------------------------------------------------------
+    # VESSEL NAME
+    # --------------------------------------------------------
+
+    if job["vessel_name"]:
+
+        lines.append(
+            f"🚢 Vessel name: "
+            f"{job['vessel_name']}"
+        )
+
+    # --------------------------------------------------------
+    # VESSEL TYPE
+    # --------------------------------------------------------
+
+    if job["vessel_type"]:
+
+        lines.append(
+            f"🚢 Vessel type: "
+            f"{job['vessel_type']}"
+        )
+
+    # --------------------------------------------------------
+    # REGION
+    # --------------------------------------------------------
+
+    if job["region"]:
+
+        lines.append(
+            f"🌍 Region: "
+            f"{job['region']}"
+        )
+
+    # --------------------------------------------------------
+    # DATE
+    # --------------------------------------------------------
+
+    if job["date"]:
+
+        lines.append(
+            f"📅 Date: "
+            f"{job['date']}"
+        )
+
+    # --------------------------------------------------------
+    # DURATION
+    # --------------------------------------------------------
+
+    if job["duration"]:
+
+        lines.append(
+            f"⏱️ Duration: "
+            f"{job['duration']}"
+        )
+
+    # --------------------------------------------------------
+    # SALARY
+    # --------------------------------------------------------
+
+    if job["salary"]:
+
+        lines.append(
+            f"💰 Salary: "
+            f"{job['salary']}"
+        )
+
+    # --------------------------------------------------------
+    # INFO
+    # --------------------------------------------------------
+
+    if job["info"]:
+
+        lines.append(
+            f"ℹ️ {job['info']}"
+        )
+
+    # --------------------------------------------------------
+    # CONTACT
+    # --------------------------------------------------------
+
+    lines.append(
+        f"📩 Contact: "
+        f"{job['email']}"
+    )
+
+    # --------------------------------------------------------
+    # HASHTAGS
+    # --------------------------------------------------------
+
+    hashtags = []
+
+    rank = job["rank"]
+
+    if rank and rank != "Multiple positions":
+
+        tag = re.sub(
+            r"[^A-Za-z0-9]",
+            "",
+            rank,
+        )
+
+        if tag:
+
+            hashtags.append(
+                "#" + tag
+            )
+
+    vessel_type = (
+        job["vessel_type"]
+    )
+
+    if vessel_type:
+
+        tag = re.sub(
+            r"[^A-Za-z0-9]",
+            "",
+            vessel_type,
+        )
+
+        if tag:
+
+            hashtags.append(
+                "#" + tag
+            )
+
+    hashtags.append(
+        "#MerchantFleet"
+    )
+
+    hashtags = list(
+        dict.fromkeys(
+            hashtags
+        )
+    )
+
+    lines.append("")
+
+    lines.append(
+        " ".join(hashtags)
+    )
+
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -1683,13 +1858,19 @@ async def read_vacancy(
 
 async def scan(sent_jobs):
 
+    now = london_now()
+
     log("")
     log("=" * 70)
-    log("=== UKR CREWING SCAN STARTED ===")
+    log("🇺🇦 === UKR CREWING SCAN STARTED ===")
     log(
-        london_now().strftime(
+        now.strftime(
             "%Y-%m-%d %H:%M:%S %Z"
         )
+    )
+    log(
+        f"Today's vacancies: "
+        f"{today_date_string()}"
     )
     log("=" * 70)
 
@@ -1724,8 +1905,19 @@ async def scan(sent_jobs):
                 page
             )
 
-            links = await collect_today_links(
-                page
+            # ------------------------------------------------
+            # DISCOVER LINKS
+            # ------------------------------------------------
+
+            links = (
+                await discover_vacancy_pages(
+                    page
+                )
+            )
+
+            log(
+                f"Found {len(links)} "
+                "vacancy links."
             )
 
             if not links:
@@ -1736,34 +1928,44 @@ async def scan(sent_jobs):
 
                 return
 
-            log("")
-            log(
-                f"Today's candidate links: "
-                f"{len(links)}"
-            )
+            # ------------------------------------------------
+            # READ ONLY NEW/TODAY VACANCIES
+            # ------------------------------------------------
 
             job_page = await context.new_page()
 
-            sent_count = 0
+            for job_id, url in links.items():
 
-            for vacancy_id, url in links.items():
-
-                if vacancy_id in sent_jobs:
+                if str(job_id) in sent_jobs:
 
                     log(
                         f"Already sent: "
-                        f"{vacancy_id}"
+                        f"{job_id}"
                     )
 
                     continue
 
-                job = await read_vacancy(
+                job = await read_job(
                     job_page,
-                    vacancy_id,
+                    job_id,
                     url,
                 )
 
                 if not job:
+
+                    continue
+
+                # ------------------------------------------------
+                # FINAL DUPLICATE CHECK
+                # ------------------------------------------------
+
+                if str(job_id) in sent_jobs:
+
+                    log(
+                        f"Already sent after parsing: "
+                        f"{job_id}"
+                    )
+
                     continue
 
                 message = make_message(
@@ -1774,10 +1976,18 @@ async def scan(sent_jobs):
                 log(
                     "--- TELEGRAM MESSAGE ---"
                 )
-                log(message)
+
+                log(
+                    message
+                )
+
                 log(
                     "--- END MESSAGE ---"
                 )
+
+                # ------------------------------------------------
+                # SEND
+                # ------------------------------------------------
 
                 try:
 
@@ -1785,49 +1995,39 @@ async def scan(sent_jobs):
                         message
                     )
 
+                    # IMPORTANT:
+                    # Save ONLY after successful Telegram send.
+
                     sent_jobs.add(
-                        vacancy_id
+                        str(job_id)
                     )
 
                     save_memory(
                         sent_jobs
                     )
 
-                    sent_count += 1
-
                     log(
-                        f"💾 Saved vacancy "
-                        f"{vacancy_id}"
+                        f"💾 Saved sent vacancy: "
+                        f"{job_id}"
                     )
 
                 except Exception as e:
 
                     log(
                         f"❌ Telegram error "
-                        f"for {vacancy_id}: "
+                        f"for {job_id}: "
                         f"{type(e).__name__}: {e}"
                     )
 
+                    # Do NOT save it.
+                    # It will be retried at the next scan.
+
             await job_page.close()
-
-            log("")
-            log(
-                f"=== SCAN FINISHED ==="
-            )
-
-            log(
-                f"New vacancies sent: "
-                f"{sent_count}"
-            )
-
-            log(
-                f"Memory contains: "
-                f"{len(sent_jobs)} IDs"
-            )
 
         finally:
 
             await context.close()
+
             await browser.close()
 
             log(
@@ -1882,12 +2082,9 @@ async def scheduler(sent_jobs):
     for hour, minute in SCHEDULE:
 
         log(
-            f"  - {hour:02d}:{minute:02d}"
+            f"  - {hour:02d}:{minute:02d} "
+            "Europe/London"
         )
-
-    log(
-        "Timezone: Europe/London"
-    )
 
     log(
         f"Memory contains "
@@ -1911,7 +2108,7 @@ async def scheduler(sent_jobs):
 
         log("")
         log(
-            f"Next scan: "
+            f"Next UKR Crewing scan: "
             f"{target.strftime('%Y-%m-%d %H:%M:%S %Z')}"
         )
 
@@ -1949,11 +2146,12 @@ async def main():
 
     log("")
     log("=" * 70)
-    log("=== UKR CREWING TELEGRAM BOT STARTED ===")
+    log("🇺🇦 UKR CREWING BOT STARTED")
     log("=" * 70)
 
     log(
-        "📂 Source: UkrCrewing"
+        "📅 Today: "
+        f"{today_date_string()}"
     )
 
     log(
@@ -1962,16 +2160,7 @@ async def main():
     )
 
     log(
-        "🕘 Schedule: "
-        "09:40, 11:15, 13:25, 15:30, 16:45"
-    )
-
-    log(
-        "🌍 Timezone: Europe/London"
-    )
-
-    log(
-        f"📅 Today: {today_string()}"
+        "🕘 Timezone: Europe/London"
     )
 
     check_environment()
@@ -1982,72 +2171,18 @@ async def main():
 
     sent_jobs = load_memory()
 
-    log("")
-    log(
-        f"💾 Loaded sent IDs: "
-        f"{len(sent_jobs)}"
-    )
-
-    if sent_jobs:
-
-        log(
-            "Previously sent IDs:"
-        )
-
-        log(
-            str(
-                sorted(
-                    sent_jobs,
-                    key=str
-                )
-            )
-        )
-
     # --------------------------------------------------------
     # TELEGRAM
     # --------------------------------------------------------
 
     await connect_telegram()
 
-    log(
-        "Telegram initialization complete."
-    )
-
     # --------------------------------------------------------
-    # IMMEDIATE FIRST SCAN
-    # --------------------------------------------------------
-
-    if RUN_SCAN_IMMEDIATELY:
-
-        log("")
-        log("=" * 70)
-        log("=== IMMEDIATE TODAY SCAN ===")
-        log("=" * 70)
-
-        try:
-
-            await scan(
-                sent_jobs
-            )
-
-            log(
-                "=== IMMEDIATE SCAN FINISHED ==="
-            )
-
-            log(
-                f"Memory now contains "
-                f"{len(sent_jobs)} IDs."
-            )
-
-        except Exception as e:
-
-            log(
-                f"🔥 IMMEDIATE SCAN ERROR: "
-                f"{type(e).__name__}: {e}"
-            )
-
-    # --------------------------------------------------------
-    # NORMAL SCHEDULE
+    # IMPORTANT:
+    #
+    # We DO NOT run an automatic full historical scan here.
+    #
+    # First scheduled scan will collect only today's vacancies.
     # --------------------------------------------------------
 
     await scheduler(
@@ -2061,10 +2196,6 @@ async def main():
 
 if __name__ == "__main__":
 
-    log(
-        "=== EXECUTING asyncio.run(main()) ==="
-    )
-
     try:
 
         asyncio.run(
@@ -2074,7 +2205,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         log(
-            "UKR Crewing bot stopped."
+            "UKR Crewing stopped."
         )
 
     except Exception as e:
