@@ -113,6 +113,7 @@ def normalize_space(text):
 
 
 def clean_value(value):
+
     if not value:
         return None
 
@@ -482,14 +483,10 @@ def valid_employer_email(email):
 def extract_contact_email(text):
 
     """
-    VERY IMPORTANT:
-
-    We search ONLY around the vacancy's
+    Search ONLY around the vacancy's
     'Контактный е-мейл' field.
 
-    We do NOT search the entire page for an email.
-    Therefore an email belonging to UkrCrewing,
-    the user's profile, footer, menu, etc. is ignored.
+    We do NOT search the whole page for email addresses.
     """
 
     if not text:
@@ -497,19 +494,15 @@ def extract_contact_email(text):
 
     patterns = [
 
-        # Russian
         r"Контактный\s+е-мейл\s*:\s*"
         r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
 
-        # Ukrainian
         r"Контактний\s+е-мейл\s*:\s*"
         r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
 
-        # English
         r"Contact\s+e-?mail\s*:\s*"
         r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
 
-        # Generic email label
         r"Е-?mail\s*:\s*"
         r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
     ]
@@ -645,7 +638,6 @@ def extract_vacancy_title(text):
         r"Вакансия\s+(.+?)(?:\n|$)",
 
         r"Vacancy\s+(.+?)(?:\n|$)",
-
     ]
 
     for pattern in patterns:
@@ -911,6 +903,11 @@ REMOVE_PHRASES = [
     "Услуги для компаний",
     "Выход",
     "Персональное меню",
+
+    # IMPORTANT:
+    # Do not include Telegram contact
+    # from UkrCrewing website.
+    "telegram: @ukrcrewing_admin",
 ]
 
 
@@ -932,6 +929,17 @@ def clean_info(text):
 
         low = line.lower()
 
+        # ----------------------------------------------------
+        # REMOVE UKRCREWING TELEGRAM ADMIN
+        # ----------------------------------------------------
+
+        if re.search(
+            r"\btelegram\s*:\s*@ukrcrewing_admin\b",
+            line,
+            re.I,
+        ):
+            continue
+
         if any(
             phrase.lower() in low
             for phrase in REMOVE_PHRASES
@@ -946,7 +954,6 @@ def clean_info(text):
 
         lines.append(line)
 
-    # Keep useful vacancy information.
     keywords = [
         "дополнительная информация",
         "additional information",
@@ -967,7 +974,6 @@ def clean_info(text):
         "english",
         "age",
         "previous",
-        "experience",
         "salary",
         "duration",
         "boarding",
@@ -1011,6 +1017,40 @@ def clean_info(text):
     return "\n".join(
         result
     ).strip()
+
+
+# ============================================================
+# FINAL MESSAGE CLEANING
+# ============================================================
+
+def remove_forbidden_telegram(text):
+
+    if not text:
+        return text
+
+    # Remove:
+    # telegram: @ukrcrewing_admin
+    text = re.sub(
+        r"(?im)^\s*telegram\s*:\s*@ukrcrewing_admin\s*$",
+        "",
+        text,
+    )
+
+    # Also remove if it appears inside a longer line.
+    text = re.sub(
+        r"(?i)\btelegram\s*:\s*@ukrcrewing_admin\b",
+        "",
+        text,
+    )
+
+    # Remove possible double blank lines.
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text,
+    )
+
+    return text.strip()
 
 
 # ============================================================
@@ -1087,7 +1127,6 @@ async def get_pagination_links(page):
 
     pages = {}
 
-    # Always include first page.
     pages["0"] = UKRCREWING_URL
 
     anchors = page.locator(
@@ -1213,8 +1252,6 @@ async def discover_vacancy_pages(page):
 
             pages[job_id] = job_url
 
-        # Check if page contains pagination.
-        # If there is no pX link, we stop.
         pagination = await get_pagination_links(
             page
         )
@@ -1291,10 +1328,6 @@ async def login_to_ukrcrewing(page):
         f"Login page URL: {page.url}"
     )
 
-    # --------------------------------------------------------
-    # EMAIL
-    # --------------------------------------------------------
-
     email = None
 
     selectors = [
@@ -1333,10 +1366,6 @@ async def login_to_ukrcrewing(page):
             "UKR Crewing email field not found."
         )
 
-    # --------------------------------------------------------
-    # PASSWORD
-    # --------------------------------------------------------
-
     password = page.locator(
         'input[type="password"]'
     ).first
@@ -1351,10 +1380,6 @@ async def login_to_ukrcrewing(page):
         "Password field found."
     )
 
-    # --------------------------------------------------------
-    # FILL
-    # --------------------------------------------------------
-
     await email.fill(
         UKRCREWING_EMAIL
     )
@@ -1366,10 +1391,6 @@ async def login_to_ukrcrewing(page):
     log(
         "Credentials filled."
     )
-
-    # --------------------------------------------------------
-    # SUBMIT
-    # --------------------------------------------------------
 
     submit = None
 
@@ -1688,27 +1709,15 @@ def make_message(job):
 
     lines = []
 
-    # --------------------------------------------------------
-    # HEADER
-    # --------------------------------------------------------
-
     lines.append(
         "🇺🇦 UkrCrewing"
     )
 
     lines.append("")
 
-    # --------------------------------------------------------
-    # RANK
-    # --------------------------------------------------------
-
     lines.append(
         f"⚓ Rank: {job['rank']}"
     )
-
-    # --------------------------------------------------------
-    # VESSEL NAME
-    # --------------------------------------------------------
 
     if job["vessel_name"]:
 
@@ -1717,20 +1726,12 @@ def make_message(job):
             f"{job['vessel_name']}"
         )
 
-    # --------------------------------------------------------
-    # VESSEL TYPE
-    # --------------------------------------------------------
-
     if job["vessel_type"]:
 
         lines.append(
             f"🚢 Vessel type: "
             f"{job['vessel_type']}"
         )
-
-    # --------------------------------------------------------
-    # REGION
-    # --------------------------------------------------------
 
     if job["region"]:
 
@@ -1739,20 +1740,12 @@ def make_message(job):
             f"{job['region']}"
         )
 
-    # --------------------------------------------------------
-    # DATE
-    # --------------------------------------------------------
-
     if job["date"]:
 
         lines.append(
             f"📅 Date: "
             f"{job['date']}"
         )
-
-    # --------------------------------------------------------
-    # DURATION
-    # --------------------------------------------------------
 
     if job["duration"]:
 
@@ -1761,10 +1754,6 @@ def make_message(job):
             f"{job['duration']}"
         )
 
-    # --------------------------------------------------------
-    # SALARY
-    # --------------------------------------------------------
-
     if job["salary"]:
 
         lines.append(
@@ -1772,28 +1761,16 @@ def make_message(job):
             f"{job['salary']}"
         )
 
-    # --------------------------------------------------------
-    # INFO
-    # --------------------------------------------------------
-
     if job["info"]:
 
         lines.append(
             f"ℹ️ {job['info']}"
         )
 
-    # --------------------------------------------------------
-    # CONTACT
-    # --------------------------------------------------------
-
     lines.append(
         f"📩 Contact: "
         f"{job['email']}"
     )
-
-    # --------------------------------------------------------
-    # HASHTAGS
-    # --------------------------------------------------------
 
     hashtags = []
 
@@ -1847,9 +1824,19 @@ def make_message(job):
         " ".join(hashtags)
     )
 
-    return "\n".join(
+    # --------------------------------------------------------
+    # FINAL SAFETY CLEANING
+    # --------------------------------------------------------
+
+    message = "\n".join(
         lines
     )
+
+    message = remove_forbidden_telegram(
+        message
+    )
+
+    return message
 
 
 # ============================================================
@@ -1905,10 +1892,6 @@ async def scan(sent_jobs):
                 page
             )
 
-            # ------------------------------------------------
-            # DISCOVER LINKS
-            # ------------------------------------------------
-
             links = (
                 await discover_vacancy_pages(
                     page
@@ -1927,10 +1910,6 @@ async def scan(sent_jobs):
                 )
 
                 return
-
-            # ------------------------------------------------
-            # READ ONLY NEW/TODAY VACANCIES
-            # ------------------------------------------------
 
             job_page = await context.new_page()
 
@@ -1954,10 +1933,6 @@ async def scan(sent_jobs):
                 if not job:
 
                     continue
-
-                # ------------------------------------------------
-                # FINAL DUPLICATE CHECK
-                # ------------------------------------------------
 
                 if str(job_id) in sent_jobs:
 
@@ -1985,18 +1960,11 @@ async def scan(sent_jobs):
                     "--- END MESSAGE ---"
                 )
 
-                # ------------------------------------------------
-                # SEND
-                # ------------------------------------------------
-
                 try:
 
                     await send_telegram(
                         message
                     )
-
-                    # IMPORTANT:
-                    # Save ONLY after successful Telegram send.
 
                     sent_jobs.add(
                         str(job_id)
@@ -2018,9 +1986,6 @@ async def scan(sent_jobs):
                         f"for {job_id}: "
                         f"{type(e).__name__}: {e}"
                     )
-
-                    # Do NOT save it.
-                    # It will be retried at the next scan.
 
             await job_page.close()
 
@@ -2165,25 +2130,9 @@ async def main():
 
     check_environment()
 
-    # --------------------------------------------------------
-    # MEMORY
-    # --------------------------------------------------------
-
     sent_jobs = load_memory()
 
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
-
     await connect_telegram()
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # We DO NOT run an automatic full historical scan here.
-    #
-    # First scheduled scan will collect only today's vacancies.
-    # --------------------------------------------------------
 
     await scheduler(
         sent_jobs
