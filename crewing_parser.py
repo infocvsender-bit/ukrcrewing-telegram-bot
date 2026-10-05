@@ -179,4 +179,5 @@ async def get_crewing_links(page):
             continue
 
         if full_url not in links:
-            links.append(full
+            links.append(full if full_url not in links:
+    links.append(full
