@@ -1873,6 +1873,15 @@ async def send_to_site(job, check_only=False):
             payload,
         )
 
+        if result.get("ok") is False:
+
+            log(
+                f"❌ Site rejected {job['id']}: "
+                f"{result.get('error')} {result.get('detail') or ''}"
+            )
+
+            return False
+
         if result.get("duplicate"):
 
             log(
