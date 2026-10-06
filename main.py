@@ -2538,6 +2538,15 @@ def _post_crewings_to_site(batch):
         return json.loads(response.read().decode("utf-8") or "{}")
 
 
+def _known_crewings():
+
+    url = SITE_IMPORT_URL.replace("/vacancies", "/crewings/known")
+    request = urllib.request.Request(url, headers={"X-Import-Token": SITE_IMPORT_TOKEN, "User-Agent": "WayAtSea-Parser/1.0"})
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return set(json.loads(response.read().decode("utf-8") or "{}").get("known") or [])
+
+
 async def scrape_crewings():
 
     if not SITE_IMPORT_URL or not SITE_IMPORT_TOKEN:
@@ -2608,6 +2617,18 @@ async def scrape_crewings():
 
             items = list(links.items())
 
+            # Продолжаем с места остановки: уже собранные за 7 дней пропускаем
+            try:
+                known = await asyncio.to_thread(_known_crewings)
+            except Exception as e:
+                known = set()
+                log(f"🏢 Не удалось получить список уже собранных: {e}")
+
+            if known:
+                before = len(items)
+                items = [(slug, url) for slug, url in items if slug not in known]
+                log(f"🏢 Уже собрано ранее: {before - len(items)}, осталось: {len(items)}")
+
             if CREWINGS_LIMIT:
                 items = items[:CREWINGS_LIMIT]
 
@@ -2617,6 +2638,9 @@ async def scrape_crewings():
             batch, sent, failed = [], 0, 0
 
             for i, (slug, url) in enumerate(items, 1):
+
+                if i % 100 == 0:
+                    log(f"🏢 Обработано {i}/{len(items)}")
 
                 try:
 
