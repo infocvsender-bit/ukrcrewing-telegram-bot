@@ -947,6 +947,190 @@ REMOVE_PHRASES = [
 ]
 
 
+# Пункты выпадающих меню UkrCrewing (должности, флоты) — это не описание вакансии
+MENU_NOISE = {
+    "1st electrician",
+    "1st engineer",
+    "1st officer",
+    "2nd electrical engineer",
+    "2nd engineer",
+    "2nd officer",
+    "3rd electrical engineer",
+    "3rd engineer",
+    "3rd officer",
+    "4th engineer",
+    "4th officer",
+    "a/c engineer",
+    "ab-cook",
+    "ab-electrician",
+    "ab-fitter",
+    "ab-motorman",
+    "ab-welder",
+    "able seaman",
+    "all positions",
+    "anchor operator",
+    "any",
+    "ass. cook",
+    "ass. hotel store keeper",
+    "assistance electrician",
+    "assistance eto",
+    "assistant a/c engineer",
+    "assistant bartender",
+    "assistant carpenter",
+    "assistant chief housekeeper",
+    "assistant maintenance supervisor",
+    "assistant maitre d",
+    "assistant waiter",
+    "asst it manager",
+    "bar waiter",
+    "barge master",
+    "bartender",
+    "boatswain",
+    "broadcast manager",
+    "buffet attendant",
+    "cabin steward",
+    "carpenter",
+    "casino dealer",
+    "casino manager",
+    "chef de partie",
+    "chief cook",
+    "chief electrician",
+    "chief engineer",
+    "chief engineer trainee",
+    "chief housekeeper",
+    "chief navigator",
+    "chief officer",
+    "chief steward",
+    "chief technologist",
+    "chief trawlmaster",
+    "cook",
+    "crane operator",
+    "crew cleaner",
+    "crew utility",
+    "dancer",
+    "deck cadet",
+    "deck engineer",
+    "deck fitter",
+    "deckhand",
+    "disc jockey",
+    "diver",
+    "doctor",
+    "donkerman",
+    "dpo",
+    "electric cadet",
+    "electric officer",
+    "electrical engineer",
+    "electrical technician",
+    "electrician",
+    "electronic engineer",
+    "engine cadet",
+    "engine fitter",
+    "eto",
+    "excavator driver",
+    "facilities cleaner",
+    "fireman",
+    "fish master",
+    "fish meal plant operator",
+    "fishing fleet",
+    "fitter",
+    "fitter repairman",
+    "fitter-turner",
+    "fitter-welder",
+    "galley utility",
+    "gas engineer",
+    "hlo",
+    "hotel director",
+    "hotel engineer",
+    "hse officer",
+    "it-manager",
+    "jdpo",
+    "junior engineer",
+    "junior officer",
+    "laundry",
+    "marine superintendent",
+    "master",
+    "mechanical technician",
+    "merchant fleet",
+    "mess boy",
+    "motorman 1st class",
+    "motorman 2nd class",
+    "motorman-electrician",
+    "motorman-fitter",
+    "motorman-oiler",
+    "motorman-turner",
+    "motorman-welder",
+    "musician",
+    "navigator",
+    "nurse",
+    "observer",
+    "offshore fleet",
+    "oiler",
+    "oiler-fitter",
+    "oiler-turner",
+    "oiler-welder",
+    "ordinary seaman",
+    "os-cook",
+    "os-welder",
+    "os-wiper",
+    "painter",
+    "passenger fleet",
+    "photographer",
+    "plumber",
+    "production technician",
+    "pumpman",
+    "quarter master",
+    "radio officer",
+    "receptionist",
+    "ref. cadet",
+    "ref. engineer",
+    "ref. machinist",
+    "rig mechanic",
+    "river fleet",
+    "safety officer",
+    "sdpo",
+    "security guard",
+    "security officer",
+    "shop seller",
+    "single engineer",
+    "sole engineer",
+    "sommelier",
+    "source mechanic",
+    "spa staff",
+    "staff capitan",
+    "staff chief engineer",
+    "staff engineer",
+    "steward",
+    "stewardess",
+    "superintendent",
+    "tanker fleet",
+    "technical superintendent",
+    "technician",
+    "technologist",
+    "trainee eto",
+    "trawlmaster",
+    "turner",
+    "waiter",
+    "watch engineer",
+    "welder",
+    "wiper",
+    "youth staff",
+}
+
+# Короткие ключевые слова ищем только как отдельные слова (иначе "age" находится в "IT-manager")
+SHORT_KEYWORDS = {"dp", "dpo", "h2s", "crew", "age", "visa", "flag", "dwt", "stcw", "bosi"}
+
+
+def info_keyword_match(low, keyword):
+
+    if keyword in SHORT_KEYWORDS:
+        return re.search(
+            r"(?<![a-zа-я0-9])" + re.escape(keyword) + r"(?![a-zа-я0-9])",
+            low,
+        ) is not None
+
+    return keyword in low
+
+
 def clean_info(text):
 
     if not text:
@@ -964,6 +1148,10 @@ def clean_info(text):
             continue
 
         low = line.lower()
+
+        # пункты меню сайта (должности из выпадающего списка и т.п.)
+        if low.strip(" •-–—:") in MENU_NOISE:
+            continue
 
         # ----------------------------------------------------
         # REMOVE UKRCREWING TELEGRAM ADMIN
@@ -1027,7 +1215,7 @@ def clean_info(text):
         low = line.lower()
 
         if any(
-            keyword in low
+            info_keyword_match(low, keyword)
             for keyword in keywords
         ):
 
@@ -2139,7 +2327,12 @@ async def scan(sent_jobs, limit=None):
 
             job_page = await context.new_page()
 
+            # Итоговая статистика сканирования
+            stats = {"checked": 0, "skipped": 0, "duplicates": 0, "sent": 0, "errors": 0}
+
             for job_id, url in links.items():
+
+                stats["checked"] += 1
 
                 if str(job_id) in sent_jobs:
 
@@ -2147,6 +2340,8 @@ async def scan(sent_jobs, limit=None):
                         f"Already sent: "
                         f"{job_id}"
                     )
+
+                    stats["duplicates"] += 1
 
                     continue
 
@@ -2157,6 +2352,8 @@ async def scan(sent_jobs, limit=None):
                 )
 
                 if not job:
+
+                    stats["skipped"] += 1
 
                     continue
 
@@ -2209,6 +2406,8 @@ async def scan(sent_jobs, limit=None):
                         f"{job_id}"
                     )
 
+                    stats["duplicates"] += 1
+
                     continue
 
                 try:
@@ -2242,6 +2441,8 @@ async def scan(sent_jobs, limit=None):
 
                     processed += 1
 
+                    stats["sent"] += 1
+
                     if limit and processed >= limit:
 
                         log(
@@ -2258,7 +2459,20 @@ async def scan(sent_jobs, limit=None):
                         f"{type(e).__name__}: {e}"
                     )
 
+                    stats["errors"] += 1
+
             await job_page.close()
+
+            log("=" * 70)
+            log(
+                f"📊 SCAN SUMMARY: найдено свежих {len(links)}, "
+                f"проверено {stats['checked']}, "
+                f"отправлено {stats['sent']}, "
+                f"пропущено (нет корп. e-mail / не свежая) {stats['skipped']}, "
+                f"дубли {stats['duplicates']}, "
+                f"ошибки {stats['errors']}"
+            )
+            log("=" * 70)
 
         finally:
 
