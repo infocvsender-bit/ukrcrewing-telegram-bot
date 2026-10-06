@@ -2486,6 +2486,183 @@ async def scan(sent_jobs, limit=None):
 
 
 # ============================================================
+# CREWING COMPANIES (ukrcrewing.com.ua/agency) → сайт Way At Sea
+# Запуск: переменная RUN_CREWINGS=1 (работает в фоне, вакансии не мешает)
+# ============================================================
+
+RUN_CREWINGS = os.getenv("RUN_CREWINGS", "").lower() in ("1", "true", "yes")
+CREWINGS_LIMIT = int(os.getenv("CREWINGS_LIMIT", "0") or 0)   # 0 = все компании
+
+AGENCY_FIELDS = {
+    "country": ["Country", "Страна", "Країна"],
+    "city": ["City", "Город", "Місто"],
+    "address": ["Address", "Адрес", "Адреса"],
+    "phone": ["Phone number", "Phone", "Телефон"],
+    "email": ["E-mail", "Email"],
+    "website": ["Website", "Сайт"],
+    "license": ["License", "Лицензия", "Ліцензія"],
+}
+
+
+def _agency_field(text, labels):
+
+    for label in labels:
+
+        m = re.search(
+            r"(?im)^\s*" + re.escape(label) + r"\s*:?\s*(.+)$",
+            text,
+        )
+
+        if m and m.group(1).strip():
+            return normalize_space(m.group(1))[:300]
+
+    return ""
+
+
+def _post_crewings_to_site(batch):
+
+    url = SITE_IMPORT_URL.replace("/vacancies", "/crewings")
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"crewings": batch}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Import-Token": SITE_IMPORT_TOKEN,
+            "User-Agent": "WayAtSea-Parser/1.0",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+
+async def scrape_crewings():
+
+    if not SITE_IMPORT_URL or not SITE_IMPORT_TOKEN:
+        log("🏢 CREWINGS: SITE_IMPORT_URL / SITE_IMPORT_TOKEN не заданы — пропуск")
+        return
+
+    log("🏢 === CREWINGS SCRAPE STARTED ===")
+
+    links = {}
+
+    async with async_playwright() as playwright:
+
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        try:
+
+            # 1. Собираем ссылки со всех страниц списка
+            for n in range(0, 200):
+
+                url = f"{UKRCREWING_BASE}/en/agency" if n == 0 else f"{UKRCREWING_BASE}/en/agency/p{n}/"
+
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(500)
+                except Exception as e:
+                    log(f"🏢 Не удалось открыть {url}: {e}")
+                    break
+
+                hrefs = await page.eval_on_selector_all(
+                    'a[href*="/agency/"]',
+                    "els => els.map(e => e.href)",
+                )
+
+                new = 0
+
+                for href in hrefs:
+
+                    m = re.search(r"/agency/([A-Za-z0-9_\-.]+)/?(?:\?.*)?$", href)
+
+                    if not m or re.fullmatch(r"p\d+", m.group(1)):
+                        continue
+
+                    slug = m.group(1)
+
+                    if slug not in links:
+                        links[slug] = f"{UKRCREWING_BASE}/en/agency/{slug}"
+                        new += 1
+
+                log(f"🏢 Page {n}: +{new} (всего {len(links)})")
+
+                if new == 0:
+                    break
+
+                if CREWINGS_LIMIT and len(links) >= CREWINGS_LIMIT:
+                    break
+
+            items = list(links.items())
+
+            if CREWINGS_LIMIT:
+                items = items[:CREWINGS_LIMIT]
+
+            log(f"🏢 Найдено компаний: {len(items)}. Открываю карточки...")
+
+            # 2. Открываем каждую компанию и отправляем пачками по 25
+            batch, sent, failed = [], 0, 0
+
+            for i, (slug, url) in enumerate(items, 1):
+
+                try:
+
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(400)
+
+                    if await is_login_page(page):
+                        await login_to_ukrcrewing(page)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+                    text = await page.locator("body").inner_text()
+
+                    name = ""
+                    if await page.locator("h1").count():
+                        name = normalize_space(await page.locator("h1").first.inner_text())
+
+                    item = {"source": "ukrcrewing", "external_id": slug, "url": url, "name": name}
+
+                    for key, labels in AGENCY_FIELDS.items():
+                        item[key] = _agency_field(text, labels)
+
+                    if not item["email"]:
+                        emails = sorted(set(EMAIL_RE.findall(text)))
+                        item["email"] = ", ".join(e for e in emails if "ukrcrewing" not in e.lower())[:300]
+
+                    batch.append(item)
+
+                except Exception as e:
+                    failed += 1
+                    log(f"🏢 Ошибка {slug}: {type(e).__name__}: {e}")
+
+                if len(batch) >= 25 or (i == len(items) and batch):
+
+                    try:
+                        await asyncio.to_thread(_post_crewings_to_site, batch)
+                        sent += len(batch)
+                        log(f"🏢 Отправлено на сайт: {sent}/{len(items)}")
+                    except Exception as e:
+                        failed += len(batch)
+                        log(f"🏢 Ошибка отправки на сайт: {type(e).__name__}: {e}")
+
+                    batch = []
+
+            log(f"🏢 === CREWINGS DONE: отправлено {sent}, ошибок {failed} ===")
+
+        finally:
+
+            await context.close()
+            await browser.close()
+
+
+# ============================================================
 # SCHEDULER
 # ============================================================
 
@@ -2618,6 +2795,18 @@ async def main():
     sent_jobs = load_memory()
 
     await connect_telegram()
+
+    if RUN_CREWINGS:
+
+        log("🏢 RUN_CREWINGS: сбор крюингов запущен в фоне")
+
+        async def _crewings_task():
+            try:
+                await scrape_crewings()
+            except Exception as e:
+                log(f"🔥 CREWINGS ERROR: {type(e).__name__}: {e}")
+
+        asyncio.create_task(_crewings_task())
 
     if RUN_ON_START:
 
