@@ -1147,6 +1147,71 @@ async def get_job_links(page):
     return links
 
 
+async def get_fresh_job_links(page):
+    """Берёт ссылки только на свежие вакансии — по колонке «Vacancy posted» в таблице списка.
+    Возвращает (свежие ссылки, сколько строк с вакансиями всего на странице)."""
+
+    fresh = {}
+    rows_total = 0
+    allowed = allowed_dates()
+
+    rows = page.locator(
+        'tr:has(a[href*="/vacancy/"])'
+    )
+
+    count = await rows.count()
+
+    for i in range(count):
+
+        try:
+
+            row = rows.nth(i)
+
+            href = await row.locator(
+                'a[href*="/vacancy/"]'
+            ).first.get_attribute("href")
+
+            text = await row.inner_text()
+
+        except Exception:
+            continue
+
+        full_url = urljoin(
+            UKRCREWING_BASE,
+            href or "",
+        )
+
+        job_id = extract_job_id(
+            full_url
+        )
+
+        if not job_id:
+            continue
+
+        # В строке две даты: посадка и публикация. Публикация — последняя.
+        dates = re.findall(
+            r"\b(\d{2})\.(\d{2})\.(\d{2,4})\b",
+            text,
+        )
+
+        if not dates:
+            continue
+
+        rows_total += 1
+
+        day, month, year = dates[-1]
+
+        if len(year) == 2:
+            year = "20" + year
+
+        posted = f"{day}.{month}.{year}"
+
+        if posted in allowed:
+            fresh[job_id] = full_url
+
+    return fresh, rows_total
+
+
 # ============================================================
 # PAGINATION
 # ============================================================
@@ -1208,6 +1273,8 @@ async def discover_vacancy_pages(page):
 
     pages = {}
 
+    stale_pages = 0
+
     current_url = UKRCREWING_URL
 
     for page_number in range(0, 100):
@@ -1218,9 +1285,11 @@ async def discover_vacancy_pages(page):
 
         else:
 
+            # сортировка «новые сначала» и на следующих страницах
             url = (
                 f"{UKRCREWING_BASE}/vacancy/"
                 f"p{page_number}/"
+                f"?v_sort=1&v_sort_dir=1"
             )
 
         log(
@@ -1258,19 +1327,19 @@ async def discover_vacancy_pages(page):
 
             break
 
-        links = await get_job_links(
+        links, rows_total = await get_fresh_job_links(
             page
         )
 
         log(
-            f"Found {len(links)} vacancy links "
-            f"on page {page_number}."
+            f"Page {page_number}: {rows_total} vacancies, "
+            f"fresh: {len(links)}"
         )
 
-        if not links:
+        if not rows_total:
 
             log(
-                "No vacancy links found. "
+                "No vacancy rows found. "
                 "Stopping pagination."
             )
 
@@ -1279,6 +1348,24 @@ async def discover_vacancy_pages(page):
         for job_id, job_url in links.items():
 
             pages[job_id] = job_url
+
+        # Список отсортирован по дате публикации: если свежих больше нет — дальше только старые
+        if not links:
+
+            stale_pages += 1
+
+            if stale_pages >= 2:
+
+                log(
+                    "Only old vacancies further. "
+                    "Stopping pagination."
+                )
+
+                break
+
+        else:
+
+            stale_pages = 0
 
         pagination = await get_pagination_links(
             page
