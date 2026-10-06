@@ -2561,9 +2561,12 @@ async def scrape_crewings():
         try:
 
             # 1. Собираем ссылки со всех страниц списка
-            for n in range(0, 200):
+            empty_pages = 0
 
-                url = f"{UKRCREWING_BASE}/en/agency" if n == 0 else f"{UKRCREWING_BASE}/en/agency/p{n}/"
+            # p1 — это та же первая страница, поэтому начинаем с /p1/ и идём дальше
+            for n in range(1, 400):
+
+                url = f"{UKRCREWING_BASE}/en/agency/p{n}/"
 
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -2594,7 +2597,10 @@ async def scrape_crewings():
 
                 log(f"🏢 Page {n}: +{new} (всего {len(links)})")
 
-                if new == 0:
+                # останавливаемся, только если 2 страницы подряд не дали новых компаний
+                empty_pages = empty_pages + 1 if new == 0 else 0
+
+                if empty_pages >= 2:
                     break
 
                 if CREWINGS_LIMIT and len(links) >= CREWINGS_LIMIT:
