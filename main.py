@@ -34,6 +34,9 @@ SITE_IMPORT_TOKEN = os.getenv("SITE_IMPORT_TOKEN")    # тот же ключ, ч
 RUN_ON_START = os.getenv("RUN_ON_START", "").lower() in ("1", "true", "yes")
 SCAN_LIMIT = int(os.getenv("SCAN_LIMIT", "0") or 0)
 
+# Разовая загрузка «только на сайт», без отправки в Telegram (чтобы не дублировать бот): SITE_ONLY=1
+SITE_ONLY = os.getenv("SITE_ONLY", "").lower() in ("1", "true", "yes")
+
 # Сколько дней назад вакансия ещё считается свежей (1 = только сегодняшние, как раньше)
 ACCEPT_DAYS = max(1, int(os.getenv("ACCEPT_DAYS", "1") or 1))
 
@@ -204,6 +207,11 @@ def check_environment():
     log(
         f"Site export enabled: "
         f"{bool(SITE_IMPORT_URL and SITE_IMPORT_TOKEN)}"
+    )
+
+    log(
+        f"RUN_ON_START={RUN_ON_START} SCAN_LIMIT={SCAN_LIMIT or 'none'} "
+        f"ACCEPT_DAYS={ACCEPT_DAYS} SITE_ONLY={SITE_ONLY}"
     )
 
     log("All required environment variables are present.")
@@ -2205,9 +2213,14 @@ async def scan(sent_jobs, limit=None):
 
                 try:
 
-                    await send_telegram(
-                        message
-                    )
+                    if SITE_ONLY:
+                        log(
+                            f"📵 SITE_ONLY: Telegram skipped for {job_id}"
+                        )
+                    else:
+                        await send_telegram(
+                            message
+                        )
 
                     sent_jobs.add(
                         str(job_id)
