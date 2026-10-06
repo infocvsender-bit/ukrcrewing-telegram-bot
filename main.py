@@ -5,6 +5,8 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin
+import urllib.error
+import urllib.request
 
 from playwright.async_api import async_playwright
 from telethon import TelegramClient
@@ -23,6 +25,17 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION")
 
 TELEGRAM_TARGET = "@fwd19472"
+
+# Сайт Way At Sea: куда отправлять вакансии (если не задано — отправка на сайт отключена)
+SITE_IMPORT_URL = os.getenv("SITE_IMPORT_URL")        # https://www.wayatsea.com/api/import/vacancies
+SITE_IMPORT_TOKEN = os.getenv("SITE_IMPORT_TOKEN")    # тот же ключ, что IMPORT_TOKEN на сайте
+
+# Разовый запуск сразу после старта (для проверки): RUN_ON_START=1, SCAN_LIMIT=3
+RUN_ON_START = os.getenv("RUN_ON_START", "").lower() in ("1", "true", "yes")
+SCAN_LIMIT = int(os.getenv("SCAN_LIMIT", "0") or 0)
+
+# Сколько дней назад вакансия ещё считается свежей (1 = только сегодняшние, как раньше)
+ACCEPT_DAYS = max(1, int(os.getenv("ACCEPT_DAYS", "1") or 1))
 
 UKRCREWING_BASE = "https://ukrcrewing.com.ua"
 
@@ -187,6 +200,11 @@ def check_environment():
             "Missing environment variables: "
             + ", ".join(missing)
         )
+
+    log(
+        f"Site export enabled: "
+        f"{bool(SITE_IMPORT_URL and SITE_IMPORT_TOKEN)}"
+    )
 
     log("All required environment variables are present.")
 
@@ -583,6 +601,16 @@ def extract_publication_date(text):
             return match.group(1)
 
     return None
+
+
+def allowed_dates():
+
+    now = london_now()
+
+    return {
+        (now - timedelta(days=i)).strftime("%d.%m.%Y")
+        for i in range(ACCEPT_DAYS)
+    }
 
 
 def is_today(publication_date):
@@ -1609,12 +1637,12 @@ async def read_job(
 
     today = today_date_string()
 
-    if publication_date != today:
+    if publication_date not in allowed_dates():
 
         log(
             f"⏭️ Skipping {job_id}: "
-            f"not today "
-            f"({publication_date} != {today})"
+            f"not fresh "
+            f"({publication_date}, today {today})"
         )
 
         return None
@@ -1699,6 +1727,98 @@ async def read_job(
     }
 
     return job
+
+
+# ============================================================
+# SITE (Way At Sea)
+# ============================================================
+
+def _post_to_site(payload):
+
+    request = urllib.request.Request(
+        SITE_IMPORT_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Import-Token": SITE_IMPORT_TOKEN,
+            "User-Agent": "WayAtSea-Parser/1.0",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=20) as response:
+        data = json.loads(response.read().decode("utf-8") or "{}")
+        return response.status, (data.get("results") or [{}])[0]
+
+
+async def send_to_site(job, check_only=False):
+    """Отправляет вакансию на сайт (check_only=True — только проверить, не дубль ли).
+    Возвращает "new" — новая вакансия, "duplicate" — уже публиковалась,
+    False — сайт не настроен или недоступен (тогда Telegram работает как обычно)."""
+
+    if not SITE_IMPORT_URL or not SITE_IMPORT_TOKEN:
+        return False
+
+    payload = {
+        "source": "ukrcrewing",
+        "external_id": str(job["id"]),
+        "url": job.get("url"),
+        "title": job.get("title"),
+        "rank": job.get("rank"),
+        "vessel_name": job.get("vessel_name"),
+        "vessel_type": job.get("vessel_type"),
+        "region": job.get("region"),
+        "joining_date": job.get("date"),
+        "duration": job.get("duration"),
+        "salary": job.get("salary"),
+        "email": job.get("email"),
+        "info": job.get("info"),
+        "published": job.get("publication_date"),
+    }
+
+    if check_only:
+        payload = {"vacancies": [payload], "dry_run": True}
+
+    try:
+
+        status, result = await asyncio.to_thread(
+            _post_to_site,
+            payload,
+        )
+
+        if result.get("duplicate"):
+
+            log(
+                f"♻️ Duplicate on site: {job['id']} "
+                f"({result.get('reason')})"
+            )
+
+            return "duplicate"
+
+        if not check_only:
+
+            log(
+                f"🌐 Sent to site: {job['id']} "
+                f"(HTTP {status})"
+            )
+
+        return "new"
+
+    except urllib.error.HTTPError as e:
+
+        log(
+            f"❌ Site error for {job['id']}: "
+            f"HTTP {e.code}"
+        )
+
+    except Exception as e:
+
+        log(
+            f"❌ Site error for {job['id']}: "
+            f"{type(e).__name__}: {e}"
+        )
+
+    return False
 
 
 # ============================================================
@@ -1843,7 +1963,9 @@ def make_message(job):
 # SCAN
 # ============================================================
 
-async def scan(sent_jobs):
+async def scan(sent_jobs, limit=None):
+
+    processed = 0
 
     now = london_now()
 
@@ -1960,6 +2082,31 @@ async def scan(sent_jobs):
                     "--- END MESSAGE ---"
                 )
 
+                # Сначала спрашиваем сайт: не публиковалась ли уже эта вакансия
+                site_result = await send_to_site(
+                    job,
+                    check_only=True,
+                )
+
+                # Уже публиковалась (например, после перезапуска парсер «забыл» её) —
+                # не дублируем и в Telegram
+                if site_result == "duplicate":
+
+                    sent_jobs.add(
+                        str(job_id)
+                    )
+
+                    save_memory(
+                        sent_jobs
+                    )
+
+                    log(
+                        f"⏭️ Skipping Telegram for duplicate: "
+                        f"{job_id}"
+                    )
+
+                    continue
+
                 try:
 
                     await send_telegram(
@@ -1978,6 +2125,21 @@ async def scan(sent_jobs):
                         f"💾 Saved sent vacancy: "
                         f"{job_id}"
                     )
+
+                    # После успешной отправки в Telegram — сохраняем вакансию на сайт
+                    await send_to_site(
+                        job
+                    )
+
+                    processed += 1
+
+                    if limit and processed >= limit:
+
+                        log(
+                            f"✋ Limit reached: {limit} vacancies"
+                        )
+
+                        break
 
                 except Exception as e:
 
@@ -2133,6 +2295,27 @@ async def main():
     sent_jobs = load_memory()
 
     await connect_telegram()
+
+    if RUN_ON_START:
+
+        log(
+            f"▶️ RUN_ON_START: scanning now "
+            f"(limit {SCAN_LIMIT or 'none'})"
+        )
+
+        try:
+
+            await scan(
+                sent_jobs,
+                limit=SCAN_LIMIT or None,
+            )
+
+        except Exception as e:
+
+            log(
+                f"🔥 START SCAN ERROR: "
+                f"{type(e).__name__}: {e}"
+            )
 
     await scheduler(
         sent_jobs
