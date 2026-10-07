@@ -24,7 +24,7 @@ TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION")
 
-TELEGRAM_TARGET = "@fwd19472"
+# Вакансии идут СНАЧАЛА на сайт, только новые — в бот @Cvsendler_bot (в @fwd19472 больше не публикуем)
 
 # Сайт Way At Sea: куда отправлять вакансии (если не задано — отправка на сайт отключена)
 SITE_IMPORT_URL = os.getenv("SITE_IMPORT_URL")        # https://www.wayatsea.com/api/import/vacancies
@@ -217,7 +217,7 @@ def check_environment():
     log("All required environment variables are present.")
 
     log(
-        f"Telegram target: {TELEGRAM_TARGET}"
+        f"Bot: {TELEGRAM_BOT} (сначала сайт, в бот — только новые)"
     )
 
     log(
@@ -425,40 +425,136 @@ async def connect_telegram():
         )
 
 
-async def send_telegram(message):
+async def bot_send_raw(text):
 
     global telegram_client
 
     if telegram_client is None:
-
-        raise RuntimeError(
-            "Telegram client is not initialized."
-        )
+        raise RuntimeError("Telegram client is not initialized.")
 
     if not telegram_client.is_connected():
-
-        log(
-            "🔌 Telegram client disconnected. "
-            "Connecting..."
-        )
-
+        log("🔌 Telegram client disconnected. Connecting...")
         await telegram_client.connect()
 
     if not await telegram_client.is_user_authorized():
+        raise RuntimeError("Telegram session is not authorized.")
 
-        raise RuntimeError(
-            "Telegram session is not authorized."
-        )
+    await telegram_client.send_message(TELEGRAM_BOT, text, link_preview=False)
 
-    await telegram_client.send_message(
-        TELEGRAM_TARGET,
-        message,
-        link_preview=False,
-    )
+    await asyncio.sleep(3)
 
-    log(
-        "✅ Telegram message sent."
-    )
+
+# ============================================================
+# ОТПРАВКА В БОТ (общий кусок для всех парсеров)
+# Сайт решил «новая» → шлём в бот. Если бот не принял — кладём в очередь
+# и досылаем при следующем запуске/скане, чтобы ничего не потерять.
+# ============================================================
+
+TELEGRAM_BOT = os.getenv("TELEGRAM_BOT", "@Cvsendler_bot")
+BOT_PENDING_FILE = os.getenv("BOT_PENDING_FILE", "bot_pending.json")
+
+_EMAIL_RE_BOT = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def clean_for_bot(text):
+    """Убираем ссылки, t.me и @юзернеймы (почты не трогаем)."""
+
+    emails = _EMAIL_RE_BOT.findall(text or "")
+    t = text or ""
+
+    for i, e in enumerate(emails):
+        t = t.replace(e, f"__EMAIL_{i}__", 1)
+
+    t = re.sub(r"(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/\S+", "", t, flags=re.I)
+    t = re.sub(r"https?://\S+|www\.\S+", "", t, flags=re.I)
+    t = re.sub(r"@\w+", "", t)
+
+    for i, e in enumerate(emails):
+        t = t.replace(f"__EMAIL_{i}__", e, 1)
+
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n\s*\n\s*\n+", "\n\n", t)
+
+    return t.strip()
+
+
+def _load_pending():
+
+    try:
+        if os.path.exists(BOT_PENDING_FILE):
+            with open(BOT_PENDING_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"⚠️ Не удалось прочитать очередь бота: {e}", flush=True)
+
+    return []
+
+
+def _save_pending(items):
+
+    try:
+        with open(BOT_PENDING_FILE, "w", encoding="utf-8") as f:
+            json.dump(items[-500:], f, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Не удалось сохранить очередь бота: {e}", flush=True)
+
+
+async def _send_to_bot_once(text):
+    """Одна попытка с ожиданием FloodWait. Реализацию отправки даёт парсер: bot_send_raw(text)."""
+
+    for attempt in range(3):
+        try:
+            await bot_send_raw(text)
+            return True
+        except Exception as e:
+            wait = getattr(e, "seconds", None)
+            if type(e).__name__ == "FloodWaitError" and wait is not None and attempt < 2:
+                print(f"⏳ Telegram просит подождать {wait} сек.", flush=True)
+                await asyncio.sleep(int(wait) + 3)
+                continue
+            print(f"❌ Бот не принял сообщение: {type(e).__name__}: {e}", flush=True)
+            return False
+
+    return False
+
+
+async def deliver_to_bot(text):
+    """Отправить в бот; если не вышло — в очередь (досылается позже)."""
+
+    text = clean_for_bot(text)
+
+    if await _send_to_bot_once(text):
+        print(f"✅ Отправлено в бот {TELEGRAM_BOT}", flush=True)
+        return True
+
+    items = _load_pending()
+    items.append(text)
+    _save_pending(items)
+    print(f"📥 Не отправилось — в очереди (всего {len(items)}), дошлю позже", flush=True)
+
+    return False
+
+
+async def flush_bot_queue():
+    """Дослать то, что не ушло в бот раньше."""
+
+    items = _load_pending()
+
+    if not items:
+        return
+
+    print(f"📤 Досылаю в бот из очереди: {len(items)}", flush=True)
+    left = []
+
+    for text in items:
+        if not await _send_to_bot_once(text):
+            left.append(text)
+        else:
+            await asyncio.sleep(2)
+
+    _save_pending(left)
+    print(f"📤 Очередь бота: отправлено {len(items) - len(left)}, осталось {len(left)}", flush=True)
 
 
 # ============================================================
@@ -2078,6 +2174,15 @@ async def send_to_site(job, check_only=False):
 
             return False
 
+        if result.get("skipped"):
+
+            log(
+                f"🗑 Сайт отклонил как мусор: {job['id']} "
+                f"({result.get('reason')})"
+            )
+
+            return "skipped"
+
         if result.get("duplicate"):
 
             log(
@@ -2275,6 +2380,9 @@ async def scan(sent_jobs, limit=None):
     )
     log("=" * 70)
 
+    if not SITE_ONLY:
+        await flush_bot_queue()
+
     async with async_playwright() as playwright:
 
         log(
@@ -2372,7 +2480,7 @@ async def scan(sent_jobs, limit=None):
 
                 log("")
                 log(
-                    "--- TELEGRAM MESSAGE ---"
+                    "--- BOT MESSAGE ---"
                 )
 
                 log(
@@ -2383,83 +2491,39 @@ async def scan(sent_jobs, limit=None):
                     "--- END MESSAGE ---"
                 )
 
-                # Сначала спрашиваем сайт: не публиковалась ли уже эта вакансия
-                site_result = await send_to_site(
-                    job,
-                    check_only=True,
-                )
+                # ---- СНАЧАЛА САЙТ: он решает — новая / дубль / мусор ----
+                site_result = await send_to_site(job)
 
-                # Уже публиковалась (например, после перезапуска парсер «забыл» её) —
-                # не дублируем и в Telegram
-                if site_result == "duplicate":
+                if site_result in ("duplicate", "skipped"):
 
-                    sent_jobs.add(
-                        str(job_id)
-                    )
-
-                    save_memory(
-                        sent_jobs
-                    )
-
-                    log(
-                        f"⏭️ Skipping Telegram for duplicate: "
-                        f"{job_id}"
-                    )
-
+                    sent_jobs.add(str(job_id))
+                    save_memory(sent_jobs)
+                    log(f"⏭️ {job_id}: в бот не отправляем ({site_result})")
                     stats["duplicates"] += 1
-
                     continue
 
-                try:
+                if site_result is False and SITE_IMPORT_URL and SITE_IMPORT_TOKEN:
 
-                    if SITE_ONLY:
-                        log(
-                            f"📵 SITE_ONLY: Telegram skipped for {job_id}"
-                        )
-                    else:
-                        await send_telegram(
-                            message
-                        )
-
-                    sent_jobs.add(
-                        str(job_id)
-                    )
-
-                    save_memory(
-                        sent_jobs
-                    )
-
-                    log(
-                        f"💾 Saved sent vacancy: "
-                        f"{job_id}"
-                    )
-
-                    # После успешной отправки в Telegram — сохраняем вакансию на сайт
-                    await send_to_site(
-                        job
-                    )
-
-                    processed += 1
-
-                    stats["sent"] += 1
-
-                    if limit and processed >= limit:
-
-                        log(
-                            f"✋ Limit reached: {limit} vacancies"
-                        )
-
-                        break
-
-                except Exception as e:
-
-                    log(
-                        f"❌ Telegram error "
-                        f"for {job_id}: "
-                        f"{type(e).__name__}: {e}"
-                    )
-
+                    log(f"⚠️ {job_id}: сайт недоступен — повтор при следующем скане")
                     stats["errors"] += 1
+                    continue
+
+                # ---- НОВАЯ → в бот ----
+                if SITE_ONLY:
+                    log(f"📵 SITE_ONLY: бот пропущен для {job_id}")
+                else:
+                    await deliver_to_bot(message)
+
+                sent_jobs.add(str(job_id))
+                save_memory(sent_jobs)
+                log(f"💾 Saved sent vacancy: {job_id}")
+
+                processed += 1
+                stats["sent"] += 1
+
+                if limit and processed >= limit:
+                    log(f"✋ Limit reached: {limit} vacancies")
+                    break
 
             await job_page.close()
 
@@ -2469,7 +2533,7 @@ async def scan(sent_jobs, limit=None):
                 f"проверено {stats['checked']}, "
                 f"отправлено {stats['sent']}, "
                 f"пропущено (нет корп. e-mail / не свежая) {stats['skipped']}, "
-                f"дубли {stats['duplicates']}, "
+                f"дубли/мусор {stats['duplicates']}, "
                 f"ошибки {stats['errors']}"
             )
             log("=" * 70)
@@ -2812,8 +2876,8 @@ async def main():
     )
 
     log(
-        "📨 Telegram: "
-        f"{TELEGRAM_TARGET}"
+        "📨 Бот: "
+        f"{TELEGRAM_BOT}"
     )
 
     log(
