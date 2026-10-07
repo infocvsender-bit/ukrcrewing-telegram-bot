@@ -2560,6 +2560,8 @@ async def scan(sent_jobs, limit=None):
 # ============================================================
 
 RUN_CREWINGS = os.getenv("RUN_CREWINGS", "").lower() in ("1", "true", "yes")
+# Дособрать ТОЛЬКО логотипы всех агентств (для уже собранных компаний): RUN_LOGOS=1
+RUN_LOGOS = os.getenv("RUN_LOGOS", "").lower() in ("1", "true", "yes")
 CREWINGS_LIMIT = int(os.getenv("CREWINGS_LIMIT", "0") or 0)   # 0 = все компании
 
 AGENCY_FIELDS = {
@@ -2614,6 +2616,50 @@ def _known_crewings():
 
     with urllib.request.urlopen(request, timeout=30) as response:
         return set(json.loads(response.read().decode("utf-8") or "{}").get("known") or [])
+
+
+async def grab_logo(page, name=""):
+    """Логотип агентства со страницы UkrCrewing → data URL (PNG/JPG/WEBP до 300 КБ) или None."""
+
+    try:
+        src = await page.evaluate("""(name) => {
+            const bad = /flag|icon|sprite|banner|avatar-default|no-?photo|placeholder|telegram|viber|whatsapp|facebook|instagram|youtube|google|apple|logo-ukrcrewing|ukrcrewing.*logo|\\/img\\/site\\//i;
+            const ok = img => img.src && !img.src.startsWith("data:") && !bad.test(img.src) && !bad.test(img.alt || "")
+                && img.naturalWidth >= 40 && img.naturalHeight >= 25 && img.naturalWidth <= 2000;
+            // 1) картинка рядом с заголовком (карточка агентства)
+            const h = document.querySelector("h1");
+            let el = h;
+            for(let i = 0; el && i < 5; i++){
+                el = el.parentElement;
+                const img = el && [...el.querySelectorAll("img")].find(ok);
+                if(img) return img.src;
+            }
+            // 2) картинка с названием компании или словом logo
+            const n = (name || "").toLowerCase().slice(0, 12);
+            const img = [...document.images].find(i => ok(i) && ((n && (i.alt || "").toLowerCase().includes(n)) || /logo|agency|company|upload/i.test(i.src)));
+            return img ? img.src : null;
+        }""", name)
+
+        if not src:
+            return None
+
+        resp = await page.request.get(src, timeout=20000)
+
+        if not resp.ok:
+            return None
+
+        body = await resp.body()
+        ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+
+        if ctype not in ("image/png", "image/jpeg", "image/webp", "image/gif") or not (300 < len(body) <= 300 * 1024):
+            return None
+
+        import base64
+        return f"data:{ctype};base64,{base64.b64encode(body).decode()}"
+
+    except Exception as e:
+        log(f"🖼 Логотип не получен: {type(e).__name__}: {e}")
+        return None
 
 
 async def scrape_crewings():
@@ -2693,7 +2739,7 @@ async def scrape_crewings():
                 known = set()
                 log(f"🏢 Не удалось получить список уже собранных: {e}")
 
-            if known:
+            if known and not RUN_LOGOS:
                 before = len(items)
                 items = [(slug, url) for slug, url in items if slug not in known]
                 log(f"🏢 Уже собрано ранее: {before - len(items)}, осталось: {len(items)}")
@@ -2727,6 +2773,27 @@ async def scrape_crewings():
                         name = normalize_space(await page.locator("h1").first.inner_text())
 
                     item = {"source": "ukrcrewing", "external_id": slug, "url": url, "name": name}
+
+                    if RUN_LOGOS:
+                        # только логотип: уже собранные компании не перезаписываем
+                        logo = await grab_logo(page, name)
+                        if logo:
+                            batch.append({"source": "ukrcrewing", "external_id": slug, "logo": logo, "logo_only": True})
+                            if len(batch) <= 3:
+                                log(f"🖼 Логотип найден: {name or slug}")
+                        else:
+                            log(f"🖼 Нет логотипа: {name or slug}")
+                        if len(batch) >= 10 or i == len(items):
+                            try:
+                                await asyncio.to_thread(_post_crewings_to_site, batch)
+                                sent += len(batch)
+                                log(f"🖼 Логотипов отправлено на сайт: {sent} (обработано {i}/{len(items)})")
+                            except Exception as e:
+                                log(f"🖼 Ошибка отправки: {type(e).__name__}: {e}")
+                            batch = []
+                        continue
+
+                    item["logo"] = await grab_logo(page, name)
 
                     for key, labels in AGENCY_FIELDS.items():
                         item[key] = _agency_field(text, labels)
@@ -2895,9 +2962,9 @@ async def main():
 
     await connect_telegram()
 
-    if RUN_CREWINGS:
+    if RUN_CREWINGS or RUN_LOGOS:
 
-        log("🏢 RUN_CREWINGS: сбор крюингов запущен в фоне")
+        log("🏢 RUN_CREWINGS / RUN_LOGOS: сбор крюингов / логотипов запущен в фоне")
 
         async def _crewings_task():
             try:
