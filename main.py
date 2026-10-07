@@ -467,7 +467,7 @@ def clean_for_bot(text):
 
     t = re.sub(r"(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/\S+", "", t, flags=re.I)
     t = re.sub(r"https?://\S+|www\.\S+", "", t, flags=re.I)
-    t = re.sub(r"@\w+", "", t)
+    t = re.sub(r"(?<![\w.])@\w+", "", t)
 
     for i, e in enumerate(emails):
         t = t.replace(f"__EMAIL_{i}__", e, 1)
@@ -523,6 +523,11 @@ async def deliver_to_bot(text):
     """Отправить в бот; если не вышло — в очередь (досылается позже)."""
 
     text = clean_for_bot(text)
+
+    # защита: без настоящей почты (name@company.com) в бот не отправляем
+    if not _EMAIL_RE_BOT.search(text):
+        print("⛔ В сообщении нет почты — в бот НЕ отправляем", flush=True)
+        return False
 
     if await _send_to_bot_once(text):
         print(f"✅ Отправлено в бот {TELEGRAM_BOT}", flush=True)
