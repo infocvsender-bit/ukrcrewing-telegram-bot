@@ -525,7 +525,12 @@ async def deliver_to_bot(text):
         print("⛔ В сообщении нет почты — в бот НЕ отправляем", flush=True)
         return False
 
+    if bot_already_sent(text):
+        print("♻️ Такой текст уже был отправлен в бот — дубль не шлём", flush=True)
+        return True
+
     if await _send_to_bot_once(text):
+        bot_mark_sent(text)
         print(f"✅ Отправлено в бот {TELEGRAM_BOT}", flush=True)
         return True
 
@@ -552,6 +557,7 @@ async def flush_bot_queue():
         if not await _send_to_bot_once(text):
             left.append(text)
         else:
+            bot_mark_sent(text)
             await asyncio.sleep(2)
 
     _save_pending(left)
@@ -2136,6 +2142,62 @@ def _post_to_site(payload):
         return response.status, (data.get("results") or [{}])[0]
 
 
+
+# ---------- Ответ сайта: «new» + готовый исправленный текст для бота ----------
+class SiteResult(str):
+    """Строка "new" (сравнение == "new" работает как раньше) + bot_text — исправленная сайтом вакансия."""
+    bot_text = None
+
+
+def _site_new(result):
+    r = SiteResult("new")
+    r.bot_text = ((result or {}).get("bot_text") or "").strip() or None
+    return r
+
+
+def bot_text_of(site, fallback):
+    """Текст для бота: исправленный сайтом, иначе старый."""
+    return getattr(site, "bot_text", None) or fallback
+
+
+# ---------- Защита от дублей в бот: одинаковый текст не отправляем повторно 14 дней ----------
+BOT_SENT_FILE = os.getenv("BOT_SENT_FILE", "bot_sent.json")
+
+
+def _bot_key(text):
+    import hashlib
+    t = re.sub(r"[^\w@.]+", " ", (text or "").lower()).strip()
+    return hashlib.sha1(t.encode("utf-8")).hexdigest()
+
+
+def _bot_sent_load():
+    try:
+        with open(BOT_SENT_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def bot_already_sent(text):
+    import time
+    d = _bot_sent_load()
+    t = d.get(_bot_key(text))
+    return bool(t and time.time() - t < 14 * 86400)
+
+
+def bot_mark_sent(text):
+    import time
+    d = _bot_sent_load()
+    now = time.time()
+    d = {k: v for k, v in d.items() if now - v < 14 * 86400}
+    d[_bot_key(text)] = now
+    try:
+        with open(BOT_SENT_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except Exception as e:
+        print(f"⚠️ Не удалось сохранить список отправленного в бот: {e}", flush=True)
+
 async def send_to_site(job, check_only=False):
     """Отправляет вакансию на сайт (check_only=True — только проверить, не дубль ли).
     Возвращает "new" — новая вакансия, "duplicate" — уже публиковалась,
@@ -2205,7 +2267,7 @@ async def send_to_site(job, check_only=False):
                 f"(HTTP {status})"
             )
 
-        return "new"
+        return _site_new(result)
 
     except urllib.error.HTTPError as e:
 
@@ -2549,7 +2611,7 @@ async def scan(sent_jobs, limit=None):
                 if SITE_ONLY:
                     log(f"📵 SITE_ONLY: бот пропущен для {job_id}")
                 else:
-                    await deliver_to_bot(message)
+                    await deliver_to_bot(bot_text_of(site_result, message))
 
                 sent_jobs.add(str(job_id))
                 save_memory(sent_jobs)
