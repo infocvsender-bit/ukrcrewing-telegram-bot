@@ -54,7 +54,7 @@ SENT_FILE = Path("/app/sent_jobs.json")
 # SCHEDULE
 # ============================================================
 
-# Когда сканировать — по Брюсселю (Europe/Brussels). Первый запуск дня — 09:00.
+# Когда сканировать — по Румынии (Бухарест) (Europe/Bucharest). Первый запуск дня — 09:00.
 # Можно поменять без правки кода: Railway → Variables → SCHEDULE=09:00,11:00,13:00,15:00,17:00
 SCHEDULE = [tuple(int(x) for x in t.strip().split(":")) for t in os.getenv("SCHEDULE", "09:00,11:00,13:00,15:00,17:00").split(",") if t.strip()]
 
@@ -336,7 +336,7 @@ def london_now():
         from zoneinfo import ZoneInfo
 
         return datetime.now(
-            ZoneInfo("Europe/Brussels")
+            ZoneInfo("Europe/Bucharest")
         )
 
     except Exception:
@@ -2970,7 +2970,7 @@ async def scheduler(sent_jobs):
 
         log(
             f"  - {hour:02d}:{minute:02d} "
-            "Europe/Brussels"
+            "Europe/Bucharest"
         )
 
     log(
@@ -3047,7 +3047,7 @@ async def main():
     )
 
     log(
-        "🕘 Timezone: Europe/Brussels"
+        "🕘 Timezone: Europe/Bucharest"
     )
 
     check_environment()
